@@ -3,7 +3,8 @@
 # to a tmux session running a logged-in claude (with Remote Control) in $HOME.
 # The VM gets the bb CLI (also as bazel and bazelisk), BUILDBUDDY_API_KEY, and
 # shallow clones of the buildbuddy repos on a branch named NAME (tracking the
-# remote branch if it exists). PROMPT, if given, is sent to claude: as its
+# remote branch if it exists), plus the guidance in vm-CLAUDE.md as claude's
+# user-level CLAUDE.md. PROMPT, if given, is sent to claude: as its
 # first message in a new session, or pasted into the session that's already
 # running.
 #
@@ -52,7 +53,7 @@ if ssh exe.dev ls --json | jq -e --arg n "$name" '.vms[] | select(.vm_name == $n
   echo "Reusing existing VM $name."
 else
   echo "Creating $name..."
-  ssh exe.dev new --name "$name" --cpu 2 --memory 4GB --disk 10GB --no-email
+  ssh exe.dev new --name "$name" --cpu 2 --memory 4GB --disk 25GB --no-email
 fi
 
 echo "Waiting for SSH..."
@@ -115,6 +116,10 @@ EOF
 )
 ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup") _ $(printf '%q ' "$name" "$git_name" "$git_email")" \
   <<<"$gh_token"$'\n'"$bb_api_key"
+
+# Guidance for every claude on the VM. Rewritten on each run, so edit
+# vm-CLAUDE.md here rather than on the VM.
+ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude && cat > ~/.claude/CLAUDE.md' <"$here/vm-CLAUDE.md"
 
 # Echo login output through, and open the sign-in URL in the right Chrome
 # profile as soon as it appears. Keeps reading to EOF so tee never gets SIGPIPE.
