@@ -111,10 +111,10 @@ if ! tmux has-session -t claude 2>/dev/null; then
     ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
   # The VM is the sandbox, so skip permission prompts, and skip the one-time
   # warning dialog about doing that. Also start in the fullscreen renderer
-  # rather than being offered it at startup.
+  # rather than being offered it at startup, and on Opus.
   mkdir -p ~/.claude
   [ -f ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
-  jq '.skipDangerousModePermissionPrompt = true | .tui = "fullscreen"' \
+  jq '.skipDangerousModePermissionPrompt = true | .tui = "fullscreen" | .model = "opus"' \
     ~/.claude/settings.json > ~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
 
   tmux new-session -d -s claude -c "$HOME"
