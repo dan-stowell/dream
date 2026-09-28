@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# vm NAME: create an exe.dev VM and attach to a tmux session running a
+# logged-in claude in $HOME.
+#
+# One-time setup: store a Claude subscription token in the macOS keychain.
+#   claude setup-token
+#   security add-generic-password -a "$USER" -s vm-claude-oauth-token -w
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: vm NAME" >&2
+  exit 2
+fi
+name=$1
+host="$name.exe.xyz"
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+
+if ! token=$(security find-generic-password -a "$USER" -s vm-claude-oauth-token -w 2>/dev/null); then
+  echo "vm: no Claude token in keychain; see the setup notes at the top of $here/vm" >&2
+  exit 1
+fi
+
+# Every exe.xyz VM presents the same host key (exe.dev's SSH proxy), so pin it
+# once for all names instead of prompting for each new VM.
+ssh_opts=(-o UserKnownHostsFile="$here/exe_known_hosts" -o StrictHostKeyChecking=yes)
+
+echo "Creating $name..."
+ssh exe.dev new --name "$name" --cpu 2 --memory 4GB --disk 10GB --no-email
+
+echo "Waiting for SSH..."
+for _ in $(seq 60); do
+  ssh "${ssh_opts[@]}" -o ConnectTimeout=5 -o BatchMode=yes "$host" true 2>/dev/null && break
+  sleep 2
+done
+
+# The token travels on stdin so it never shows up in a process list.
+remote_setup=$(cat <<'EOF'
+set -euo pipefail
+umask 077
+
+IFS= read -r token
+mkdir -p ~/.config/vm
+printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' "$token" > ~/.config/vm/env
+grep -q 'config/vm/env' ~/.bashrc || echo '[ -f ~/.config/vm/env ] && . ~/.config/vm/env' >> ~/.bashrc
+
+# Skip claude's first-run onboarding and the folder trust prompt for $HOME.
+[ -f ~/.claude.json ] || echo '{}' > ~/.claude.json
+jq --arg home "$HOME" '.hasCompletedOnboarding = true | .projects[$home].hasTrustDialogAccepted = true' \
+  ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
+
+if ! tmux has-session -t claude 2>/dev/null; then
+  tmux new-session -d -s claude -c "$HOME"
+  tmux send-keys -t claude claude Enter
+fi
+EOF
+)
+ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup")" <<<"$token"
+
+if [[ -t 1 ]]; then
+  exec ssh "${ssh_opts[@]}" -t "$host" tmux attach -t claude
+fi
+echo "Ready: ssh -t $host tmux attach -t claude"
