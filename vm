@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # vm NAME [PROMPT]: create an exe.dev VM (or reuse an existing one) and attach
-# to a tmux session running a logged-in claude (with Remote Control) in $HOME,
-# with buildbuddy and buildbuddy-internal cloned there. PROMPT, if given, is
-# sent to claude: as its first message in a new session, or pasted into the
-# session that's already running.
+# to a tmux session running a logged-in claude (with Remote Control) in $HOME.
+# The VM gets the bb CLI (also as bazel and bazelisk), BUILDBUDDY_API_KEY, and
+# shallow clones of the buildbuddy repos on a branch named NAME (tracking the
+# remote branch if it exists). PROMPT, if given, is sent to claude: as its
+# first message in a new session, or pasted into the session that's already
+# running.
 #
 # The first run on a new VM logs claude in to claude.ai: the sign-in page opens
 # in Chrome, and you paste the code it shows back into the terminal.
 #
-# One-time setup: store a GitHub token in the macOS keychain.
-#   security add-generic-password -a "$USER" -s vm-github-token -w
+# One-time setup: store a GitHub token and a BuildBuddy API key in the macOS
+# keychain.
+#   security add-generic-password -U -a "$USER" -s vm-github-token -w
+#   security add-generic-password -U -a "$USER" -s buildbuddy-api-key -w
 set -euo pipefail
 
 chrome_profile=${VM_CHROME_PROFILE:-Profile 5}
 claude_email=${VM_CLAUDE_EMAIL:-dstowell@gmail.com}
+git_name=${VM_GIT_NAME:-Dan Stowell}
+git_email=${VM_GIT_EMAIL:-dan@buildbuddy.io}
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
   echo "usage: vm NAME [PROMPT]" >&2
@@ -22,10 +28,19 @@ fi
 name=$1
 prompt=${2:-}
 host="$name.exe.xyz"
+# exe.dev's naming rule, checked up front so a bad name fails before any work.
+if (( ${#name} < 5 || ${#name} > 52 )) || [[ ! $name =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]]; then
+  echo "vm: invalid name \"$name\": use 5-52 lowercase letters, digits and single hyphens, starting with a letter" >&2
+  exit 2
+fi
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 if ! gh_token=$(security find-generic-password -a "$USER" -s vm-github-token -w 2>/dev/null); then
   echo "vm: no GitHub token in keychain; see the setup notes at the top of $here/vm" >&2
+  exit 1
+fi
+if ! bb_api_key=$(security find-generic-password -a "$USER" -s buildbuddy-api-key -w 2>/dev/null); then
+  echo "vm: no BuildBuddy API key in keychain; see the setup notes at the top of $here/vm" >&2
   exit 1
 fi
 
@@ -54,23 +69,52 @@ if [[ -z $ready ]]; then
   exit 1
 fi
 
-# The token travels on stdin so it never shows up in a process list.
+# Secrets travel on stdin so they never show up in a process list.
 remote_setup=$(cat <<'EOF'
 set -euo pipefail
+branch=$1 git_name=$2 git_email=$3
 
 IFS= read -r gh_token
+IFS= read -r bb_api_key
 gh auth login --hostname github.com --git-protocol https --with-token <<<"$gh_token"
 gh auth setup-git --hostname github.com
+git config --global user.name "$git_name"
+git config --global user.email "$git_email"
 
-for repo in buildbuddy buildbuddy-internal; do
+# tmux starts login shells, which read ~/.profile.
+mkdir -p ~/.config/vm
+(umask 077 && printf 'export BUILDBUDDY_API_KEY=%q\n' "$bb_api_key" > ~/.config/vm/env)
+grep -q 'config/vm/env' ~/.profile || echo '[ -f ~/.config/vm/env ] && . ~/.config/vm/env' >> ~/.profile
+
+if ! command -v bb >/dev/null; then
+  echo "Installing bb..."
+  arch=$(uname -m)
+  [ "$arch" = aarch64 ] && arch=arm64
+  tmp=$(mktemp -d)
+  gh release download --repo buildbuddy-io/bazel --pattern "bazel-*-linux-$arch" --dir "$tmp"
+  sudo install -m 0755 "$tmp"/bazel-*-linux-"$arch" /usr/local/bin/bb
+  rm -rf "$tmp"
+fi
+sudo ln -sf bb /usr/local/bin/bazel
+sudo ln -sf bb /usr/local/bin/bazelisk
+
+for repo in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain; do
   if [ ! -d ~/"$repo"/.git ]; then
     echo "Cloning $repo..."
     gh repo clone "buildbuddy-io/$repo" ~/"$repo" -- --quiet --depth 1 --branch master
+    if git -C ~/"$repo" ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+      git -C ~/"$repo" remote set-branches --add origin "$branch"
+      git -C ~/"$repo" fetch --quiet --depth 1 origin "$branch"
+      git -C ~/"$repo" checkout --quiet -b "$branch" --track "origin/$branch"
+    else
+      git -C ~/"$repo" checkout --quiet -b "$branch"
+    fi
   fi
 done
 EOF
 )
-ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup")" <<<"$gh_token"
+ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup") _ $(printf '%q ' "$name" "$git_name" "$git_email")" \
+  <<<"$gh_token"$'\n'"$bb_api_key"
 
 # Echo login output through, and open the sign-in URL in the right Chrome
 # profile as soon as it appears. Keeps reading to EOF so tee never gets SIGPIPE.
