@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # vm NAME: create an exe.dev VM (or reuse an existing one) and attach to a tmux
-# session running a logged-in claude in $HOME, with buildbuddy cloned there.
+# session running a logged-in claude (with Remote Control) in $HOME, with
+# buildbuddy cloned there.
 #
-# One-time setup: store tokens in the macOS keychain.
-#   claude setup-token
-#   security add-generic-password -a "$USER" -s vm-claude-oauth-token -w
+# The first run on a new VM logs claude in to claude.ai: the sign-in page opens
+# in Chrome, and you paste the code it shows back into the terminal.
+#
+# One-time setup: store a GitHub token in the macOS keychain.
 #   security add-generic-password -a "$USER" -s vm-github-token -w
 set -euo pipefail
+
+chrome_profile=${VM_CHROME_PROFILE:-Profile 5}
+claude_email=${VM_CLAUDE_EMAIL:-dstowell@gmail.com}
 
 if [[ $# -ne 1 ]]; then
   echo "usage: vm NAME" >&2
@@ -16,10 +21,6 @@ name=$1
 host="$name.exe.xyz"
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
-if ! token=$(security find-generic-password -a "$USER" -s vm-claude-oauth-token -w 2>/dev/null); then
-  echo "vm: no Claude token in keychain; see the setup notes at the top of $here/vm" >&2
-  exit 1
-fi
 if ! gh_token=$(security find-generic-password -a "$USER" -s vm-github-token -w 2>/dev/null); then
   echo "vm: warning: no GitHub token in keychain, so gh won't be logged in" >&2
   gh_token=
@@ -50,16 +51,11 @@ if [[ -z $ready ]]; then
   exit 1
 fi
 
-# Tokens travel on stdin so they never show up in a process list.
+# The token travels on stdin so it never shows up in a process list.
 remote_setup=$(cat <<'EOF'
 set -euo pipefail
 
-IFS= read -r token
 IFS= read -r gh_token || true
-mkdir -p ~/.config/vm
-(umask 077 && printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' "$token" > ~/.config/vm/env)
-grep -q 'config/vm/env' ~/.bashrc || echo '[ -f ~/.config/vm/env ] && . ~/.config/vm/env' >> ~/.bashrc
-
 if [ -n "$gh_token" ]; then
   gh auth login --hostname github.com --git-protocol https --with-token <<<"$gh_token"
   gh auth setup-git --hostname github.com
@@ -69,6 +65,39 @@ if [ ! -d ~/buildbuddy/.git ]; then
   echo "Cloning buildbuddy..."
   git clone --quiet --depth 1 --branch master https://github.com/buildbuddy-io/buildbuddy.git ~/buildbuddy
 fi
+EOF
+)
+ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup")" <<<"$gh_token"
+
+# Echo login output through, and open the sign-in URL in the right Chrome
+# profile as soon as it appears. Keeps reading to EOF so tee never gets SIGPIPE.
+open_login_url() {
+  local line opened= url_re='(https://claude\.com/cai/oauth/authorize[^[:space:][:cntrl:]]+)'
+  while IFS= read -r line; do
+    if [[ -z $opened && $line =~ $url_re ]]; then
+      open -na "Google Chrome" --args --profile-directory="$chrome_profile" "${BASH_REMATCH[1]}"
+      opened=1
+    fi
+  done
+}
+
+# Remote Control needs a full claude.ai login; setup-token tokens can't do it.
+if ! ssh "${ssh_opts[@]}" "$host" 'claude auth status >/dev/null 2>&1'; then
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    echo "vm: claude on $host needs a one-time login; run vm from a terminal" >&2
+    exit 1
+  fi
+  echo "Logging claude in to claude.ai (opening Chrome: $chrome_profile)..."
+  ssh "${ssh_opts[@]}" -t "$host" claude auth login --claudeai --email "$claude_email" | tee >(open_login_url)
+  if ! ssh "${ssh_opts[@]}" "$host" 'claude auth status >/dev/null 2>&1'; then
+    echo "vm: claude login on $host didn't complete; run vm $name again to retry" >&2
+    exit 1
+  fi
+fi
+
+remote_start=$(cat <<'EOF'
+set -euo pipefail
+name=$1
 
 if ! tmux has-session -t claude 2>/dev/null; then
   # Skip claude's first-run onboarding and the folder trust prompt for $HOME.
@@ -84,11 +113,11 @@ if ! tmux has-session -t claude 2>/dev/null; then
     ~/.claude/settings.json > ~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
 
   tmux new-session -d -s claude -c "$HOME"
-  tmux send-keys -t claude 'claude --dangerously-skip-permissions' Enter
+  tmux send-keys -t claude "claude --dangerously-skip-permissions --remote-control $name" Enter
 fi
 EOF
 )
-ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup")" <<<"$token"$'\n'"$gh_token"
+ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_start") _ $(printf %q "$name")"
 
 if [[ -t 1 ]]; then
   exec ssh "${ssh_opts[@]}" -t "$host" tmux attach -t claude
