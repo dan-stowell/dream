@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# vm NAME: create an exe.dev VM and attach to a tmux session running a
-# logged-in claude in $HOME.
+# vm NAME: create an exe.dev VM (or reuse an existing one) and attach to a tmux
+# session running a logged-in claude in $HOME, with buildbuddy cloned there.
 #
 # One-time setup: store a Claude subscription token in the macOS keychain.
 #   claude setup-token
@@ -24,31 +24,48 @@ fi
 # once for all names instead of prompting for each new VM.
 ssh_opts=(-o UserKnownHostsFile="$here/exe_known_hosts" -o StrictHostKeyChecking=yes)
 
-echo "Creating $name..."
-ssh exe.dev new --name "$name" --cpu 2 --memory 4GB --disk 10GB --no-email
+if ssh exe.dev ls --json | jq -e --arg n "$name" '.vms[] | select(.vm_name == $n)' >/dev/null; then
+  echo "Reusing existing VM $name."
+else
+  echo "Creating $name..."
+  ssh exe.dev new --name "$name" --cpu 2 --memory 4GB --disk 10GB --no-email
+fi
 
 echo "Waiting for SSH..."
+ready=
 for _ in $(seq 60); do
-  ssh "${ssh_opts[@]}" -o ConnectTimeout=5 -o BatchMode=yes "$host" true 2>/dev/null && break
+  if ssh "${ssh_opts[@]}" -o ConnectTimeout=5 -o BatchMode=yes "$host" true 2>/dev/null; then
+    ready=1
+    break
+  fi
   sleep 2
 done
+if [[ -z $ready ]]; then
+  echo "vm: $host did not accept SSH within 2 minutes" >&2
+  exit 1
+fi
 
 # The token travels on stdin so it never shows up in a process list.
 remote_setup=$(cat <<'EOF'
 set -euo pipefail
-umask 077
 
 IFS= read -r token
 mkdir -p ~/.config/vm
-printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' "$token" > ~/.config/vm/env
+(umask 077 && printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' "$token" > ~/.config/vm/env)
 grep -q 'config/vm/env' ~/.bashrc || echo '[ -f ~/.config/vm/env ] && . ~/.config/vm/env' >> ~/.bashrc
 
-# Skip claude's first-run onboarding and the folder trust prompt for $HOME.
-[ -f ~/.claude.json ] || echo '{}' > ~/.claude.json
-jq --arg home "$HOME" '.hasCompletedOnboarding = true | .projects[$home].hasTrustDialogAccepted = true' \
-  ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
+if [ ! -d ~/buildbuddy/.git ]; then
+  echo "Cloning buildbuddy..."
+  git clone --quiet --depth 1 --branch master https://github.com/buildbuddy-io/buildbuddy.git ~/buildbuddy
+fi
 
 if ! tmux has-session -t claude 2>/dev/null; then
+  # Skip claude's first-run onboarding and the folder trust prompt for $HOME.
+  # Only touched while claude isn't running, since claude rewrites this file.
+  [ -f ~/.claude.json ] || echo '{}' > ~/.claude.json
+  jq --arg home "$HOME" '.hasCompletedOnboarding = true | .projects[$home].hasTrustDialogAccepted = true' \
+    ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
+
   tmux new-session -d -s claude -c "$HOME"
   tmux send-keys -t claude claude Enter
 fi
