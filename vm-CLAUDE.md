@@ -19,6 +19,10 @@ each on a branch named after the VM.
   with `bb view <invocation-id-or-url>` rather than from `bazel-testlogs`.
   `--errors` prints just the first build error; adding target labels or
   `--test_filter=Name` prints the failed test output. See `bb view --help`.
+- Before pushing, catch formatting and lint issues with
+  `bb run --config=remote -- //tools/lint` in buildbuddy, or
+  `bb run --config=remote -- @com_github_buildbuddy_io_buildbuddy//tools/lint`
+  in buildbuddy-internal. Add `-fix` to fix what it can.
 - `gh` is logged in as Dan's own GitHub account, so anything done with it
   (pushes, PRs, comments) shows up as Dan.
 - Commit and push often.
