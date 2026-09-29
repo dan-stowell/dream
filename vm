@@ -4,9 +4,9 @@
 # The VM gets the bb CLI (also as bazel and bazelisk), BUILDBUDDY_API_KEY, and
 # shallow clones of the buildbuddy repos on a branch named NAME (tracking the
 # remote branch if it exists), plus the guidance in vm-CLAUDE.md as claude's
-# user-level CLAUDE.md. PROMPT, if given, is sent to claude: as its
-# first message in a new session, or pasted into the session that's already
-# running.
+# user-level CLAUDE.md and Shelley's AGENTS.md. PROMPT, if given, is sent to
+# claude: as its first message in a new session, or pasted into the session
+# that's already running.
 #
 # The first run on a new VM logs claude in to claude.ai: the sign-in page opens
 # in Chrome, and you paste the code it shows back into the terminal.
@@ -117,9 +117,10 @@ EOF
 ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup") _ $(printf '%q ' "$name" "$git_name" "$git_email")" \
   <<<"$gh_token"$'\n'"$bb_api_key"
 
-# Guidance for every claude on the VM. Rewritten on each run, so edit
-# vm-CLAUDE.md here rather than on the VM.
-ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude && cat > ~/.claude/CLAUDE.md' <"$here/vm-CLAUDE.md"
+# Guidance for every claude and Shelley on the VM. Rewritten on each run, so
+# edit vm-CLAUDE.md here rather than on the VM.
+ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude ~/.config/shelley &&
+  tee ~/.claude/CLAUDE.md >~/.config/shelley/AGENTS.md' <"$here/vm-CLAUDE.md"
 
 # Echo login output through, and open the sign-in URL in the right Chrome
 # profile as soon as it appears. Keeps reading to EOF so tee never gets SIGPIPE.
