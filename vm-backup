@@ -27,7 +27,6 @@ for name in "${names[@]}"; do
   host="$name.exe.xyz"
   out="$dest/$name"
   echo "$(date '+%F %T') $name"
-  mkdir -p "$out/claude" "$out/codex" "$out/shelley"
 
   # Shelley writes to its database while running, so snapshot it consistently
   # rather than copying the live file.
@@ -38,6 +37,7 @@ for name in "${names[@]}"; do
     failed+=("$name")
     continue
   fi
+  mkdir -p "$out/claude" "$out/codex" "$out/shelley"
 
   ok=1
   for pair in .claude/projects/:claude/projects .claude/history.jsonl:claude/ \
