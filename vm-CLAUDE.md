@@ -26,8 +26,10 @@ each on a branch named after the VM.
 - `gh` is logged in as Dan's own GitHub account, so anything done with it
   (pushes, PRs, comments) shows up as Dan.
 - Commit and push often.
-- When asked for a codex review, run `codex review` in the repo, e.g.
-  `codex review --base master` for the branch or `codex review --uncommitted`
-  for the working tree (`codex review --help` lists more options). It's
-  already configured, so pass no model or provider flags. Only do this when
-  asked, and don't ask codex to request reviews itself.
+- When asked for a codex review, run `codex exec --sandbox read-only "PROMPT"`
+  in the repo, with a prompt that says what to review (e.g. the branch's
+  changes from `git diff master...HEAD`, or the uncommitted changes) and what
+  to look for. Prefer it to `codex review`, which can't take custom
+  instructions together with `--base`. `-o FILE` saves codex's final message.
+  Codex is already configured, so pass no model or provider flags. Only do
+  this when asked, and don't ask codex to request reviews itself.
