@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# vm-backup [NAME...]: copy the claude, codex and Shelley transcripts from
+# exe.dev VMs (all running ones by default) into ~/vm-transcripts/NAME. Nothing
+# is ever deleted from the backup, so transcripts outlive both the VM and
+# claude's own cleanup of old sessions.
+#
+# Runs hourly via launchd, logging to ~/Library/Logs/vm-backup.log. One-time
+# setup:
+#   cp ~/dream/com.dstowell.vm-backup.plist ~/Library/LaunchAgents/
+#   launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.dstowell.vm-backup.plist
+set -uo pipefail
+
+dest=${VM_BACKUP_DIR:-$HOME/vm-transcripts}
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+ssh_opts=(-o UserKnownHostsFile="$here/exe_known_hosts" -o StrictHostKeyChecking=yes
+  -o BatchMode=yes -o ConnectTimeout=10)
+
+if (( $# )); then
+  names=("$@")
+else
+  names=($(ssh -o BatchMode=yes exe.dev ls --json |
+    jq -r '.vms[] | select(.status == "running") | .vm_name')) || exit 1
+fi
+
+failed=()
+for name in "${names[@]}"; do
+  host="$name.exe.xyz"
+  out="$dest/$name"
+  echo "$(date '+%F %T') $name"
+  mkdir -p "$out/claude" "$out/codex" "$out/shelley"
+
+  # Shelley writes to its database while running, so snapshot it consistently
+  # rather than copying the live file.
+  if ! ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.cache/vm-backup &&
+      if [ -f ~/.config/shelley/shelley.db ]; then
+        sqlite3 ~/.config/shelley/shelley.db ".backup $HOME/.cache/vm-backup/shelley.db"
+      fi'; then
+    failed+=("$name")
+    continue
+  fi
+
+  ok=1
+  for pair in .claude/projects/:claude/projects .claude/history.jsonl:claude/ \
+      .codex/sessions/:codex/sessions .cache/vm-backup/shelley.db:shelley/; do
+    src=${pair%%:*} dst=${pair#*:}
+    # Skip paths an agent hasn't created yet on this VM.
+    ssh "${ssh_opts[@]}" "$host" "test -e $src" || continue
+    rsync -a -e "ssh ${ssh_opts[*]}" "$host:$src" "$out/$dst" || ok=
+  done
+  [[ -n $ok ]] || failed+=("$name")
+done
+
+if (( ${#failed[@]} )); then
+  echo "vm-backup: failed for ${failed[*]}" >&2
+  exit 1
+fi
