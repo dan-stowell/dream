@@ -44,7 +44,7 @@ const maxLog = 256 << 10
 
 type job struct {
 	ID       int       `json:"id"`
-	Kind     string    `json:"kind"` // start, prompt, rm, login
+	Kind     string    `json:"kind"` // start, prompt, rm
 	VM       string    `json:"vm"`
 	State    string    `json:"state"` // running, login, ok, failed
 	LoginURL string    `json:"login_url,omitempty"`
@@ -205,8 +205,22 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusConflict, "that job isn't waiting for a login")
 		return
 	}
+	// The same job carries on: type the code into the VM's waiting login,
+	// then rerun the start it interrupted.
+	j.State, j.LoginURL, j.Ended = "running", "", time.Time{}
 	s.mu.Unlock()
-	s.spawnLogin(w, j.VM, strings.TrimSpace(req.Code), j.Prompt)
+	go func() {
+		err := s.run(j, "login", j.VM, strings.TrimSpace(req.Code))
+		if err == nil {
+			args := []string{j.VM}
+			if j.Prompt != "" {
+				args = append(args, j.Prompt)
+			}
+			err = s.run(j, args...)
+		}
+		s.finish(j, err)
+	}()
+	writeJSON(w, map[string]any{"id": j.ID})
 }
 
 func (s *server) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -265,28 +279,6 @@ func (s *server) spawn(w http.ResponseWriter, kind, vm, prompt string) {
 			}
 		}
 		s.finish(j, s.run(j, args...))
-	}()
-	writeJSON(w, map[string]any{"id": j.ID})
-}
-
-// spawnLogin types the code into the VM's waiting login, then reruns the
-// start it interrupted.
-func (s *server) spawnLogin(w http.ResponseWriter, vm, code, prompt string) {
-	j, err := s.newJob("login", vm, prompt)
-	if err != nil {
-		httpError(w, http.StatusConflict, "%v", err)
-		return
-	}
-	go func() {
-		err := s.run(j, "login", vm, code)
-		if err == nil {
-			args := []string{vm}
-			if prompt != "" {
-				args = append(args, prompt)
-			}
-			err = s.run(j, args...)
-		}
-		s.finish(j, err)
 	}()
 	writeJSON(w, map[string]any{"id": j.ID})
 }
