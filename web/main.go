@@ -32,7 +32,7 @@ var static embed.FS
 var (
 	addr    = flag.String("addr", ":8000", "address to listen on")
 	vmPath  = flag.String("vm", "", "path to the vm script (default: ../vm next to this binary's source)")
-	allowed = flag.String("allow", "dstowell@gmail.com", "comma-separated emails allowed to use the app")
+	allowed = flag.String("allow", "dan@buildbuddy.io,dstowell@gmail.com", "comma-separated emails allowed to use the app")
 )
 
 // vm's naming rule, as checked by the script itself.
