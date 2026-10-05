@@ -125,7 +125,14 @@ func (s *server) auth(next http.Handler) http.Handler {
 func (s *server) listVMs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "exe.dev", "ls", "--json").Output()
+	// exe.dev occasionally drops a connection, so try twice.
+	var out []byte
+	var err error
+	for range 2 {
+		if out, err = exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "exe.dev", "ls", "--json").Output(); err == nil {
+			break
+		}
+	}
 	if err != nil {
 		// exe.dev explains some failures, like an unknown key, on stdout.
 		if msg := bytes.TrimSpace(out); len(msg) > 0 {

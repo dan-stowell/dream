@@ -95,6 +95,7 @@ pre.log {
 
   <h2>VMs <button id="refresh" style="margin-left:8px; padding:1px 8px; font-size:12px">refresh</button></h2>
   <div class="panel" id="vms"><div class="empty muted">Loading…</div></div>
+  <div class="err" id="vms-err" style="margin-top:6px"></div>
 
   <h2>Activity</h2>
   <div class="panel" id="jobs"><div class="empty muted">Nothing yet.</div></div>
@@ -149,8 +150,11 @@ async function loadVMs() {
       </div>`;
     }).join("");
     markBusy();
+    $("#vms-err").textContent = "";
   } catch (e) {
-    el.innerHTML = `<div class="empty err">${esc(e.message)}</div>`;
+    // Keep showing the last good list rather than replacing it with an error.
+    if ($(".vm", el)) $("#vms-err").textContent = `Couldn't refresh: ${e.message}`;
+    else el.innerHTML = `<div class="empty err">${esc(e.message)}</div>`;
   }
 }
 
@@ -275,8 +279,10 @@ $("#jobs").addEventListener("click", async e => {
 
 loadVMs();
 loadJobs();
-setInterval(loadJobs, 2000);
-setInterval(loadVMs, 30000);
+// Poll only while the tab is visible, and catch up as soon as it is again.
+setInterval(() => document.hidden || loadJobs(), 2000);
+setInterval(() => document.hidden || loadVMs(), 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { loadJobs(); loadVMs(); } });
 </script>
 </body>
 </html>
