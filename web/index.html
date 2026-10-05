@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vm</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
+  --accent: #2f5bd3; --accent-text: #fff; --ok: #1f8a4c; --warn: #b26b00; --bad: #c0392b;
+  --code-bg: #f0f0ec;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --panel: #1f1f1d; --text: #ececea; --muted: #9a9a94; --line: #33332f;
+    --accent: #6b8cff; --accent-text: #0d0d0c; --ok: #4cc27f; --warn: #e0a040; --bad: #ef6b5b;
+    --code-bg: #262624;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 28px 0 10px; font-weight: 600; }
+.muted { color: var(--muted); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+form.new { padding: 14px; display: grid; gap: 10px; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; }
+input, textarea {
+  font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 7px; padding: 8px 10px; width: 100%;
+}
+textarea { min-height: 64px; resize: vertical; }
+input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+button {
+  font: inherit; font-weight: 550; border-radius: 7px; padding: 7px 14px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text); white-space: nowrap;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+button.danger { color: var(--bad); }
+button:disabled { opacity: 0.5; cursor: default; }
+.vm { padding: 12px 14px; border-top: 1px solid var(--line); display: grid; gap: 8px; }
+.vm:first-child { border-top: 0; }
+.vm-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.vm-name { font-weight: 650; font-size: 16px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.running { background: var(--ok); }
+.tag { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 99px; padding: 0 8px; }
+.spacer { flex: 1; }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
+.cmd { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cmd code { background: var(--code-bg); padding: 3px 7px; border-radius: 5px; overflow-x: auto; white-space: nowrap; min-width: 0; }
+.cmd button { padding: 2px 8px; font-size: 12px; }
+a { color: var(--accent); }
+.prompt-box { display: none; gap: 8px; }
+.prompt-box.open { display: grid; }
+.job { padding: 12px 14px; border-top: 1px solid var(--line); }
+.job:first-child { border-top: 0; }
+.job-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.state { font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
+.state.running { color: var(--accent); } .state.ok { color: var(--ok); }
+.state.login { color: var(--warn); } .state.failed { color: var(--bad); }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 6px; }
+pre.log {
+  background: var(--code-bg); padding: 10px; border-radius: 7px; max-height: 360px;
+  overflow: auto; white-space: pre-wrap; word-break: break-word; margin: 8px 0 0;
+}
+.login { margin-top: 10px; padding: 12px; border: 1px solid var(--warn); border-radius: 8px; display: grid; gap: 8px; }
+.empty { padding: 14px; }
+.err { color: var(--bad); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>vm</h1>
+    <span class="muted" id="who"></span>
+  </header>
+
+  <form class="panel new" id="new">
+    <div class="row">
+      <input id="new-name" placeholder="name, e.g. fix-flaky-test" autocomplete="off" required
+        pattern="[a-z][a-z0-9]*(-[a-z0-9]+)*" minlength="5" maxlength="52" style="flex:1; min-width: 200px">
+      <button class="primary" type="submit">Start VM</button>
+    </div>
+    <textarea id="new-prompt" placeholder="Optional first prompt for claude"></textarea>
+    <div class="muted" style="font-size:13px">Creates the VM (or reuses one with that name), clones the repos on a branch named after it, and starts claude with Remote Control.</div>
+    <div class="err" id="new-err"></div>
+  </form>
+
+  <h2>VMs <button id="refresh" style="margin-left:8px; padding:1px 8px; font-size:12px">refresh</button></h2>
+  <div class="panel" id="vms"><div class="empty muted">Loading…</div></div>
+
+  <h2>Activity</h2>
+  <div class="panel" id="jobs"><div class="empty muted">Nothing yet.</div></div>
+</main>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let busy = new Set();           // VMs with a running job
+const openLogs = new Set();     // job ids whose log is expanded
+const openPrompts = new Set();  // VM names with the prompt box open
+
+async function api(method, path, body) {
+  const r = await fetch(path, {
+    method, headers: body ? {"Content-Type": "application/json"} : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+async function loadVMs() {
+  const el = $("#vms");
+  try {
+    const {vms, self} = await api("GET", "/api/vms");
+    const drafts = {};  // keep half-written prompts across refreshes
+    el.querySelectorAll(".vm").forEach(r => drafts[r.dataset.name] = $(".prompt-box textarea", r).value);
+    if (!vms.length) { el.innerHTML = `<div class="empty muted">No VMs.</div>`; return; }
+    el.innerHTML = vms.map(v => {
+      const n = v.vm_name, isSelf = n === self;
+      const ssh = `ssh -t ${v.ssh_dest || n + ".exe.xyz"} tmux attach -t claude`;
+      return `<div class="vm" data-name="${esc(n)}">
+        <div class="vm-head">
+          <span class="dot ${esc(v.status)}"></span>
+          <span class="vm-name">${esc(n)}</span>
+          <span class="tag">${esc(v.status)}</span>
+          ${v.region ? `<span class="tag">${esc(v.region)}</span>` : ""}
+          ${isSelf ? `<span class="tag">this app</span>` : ""}
+          <span class="spacer"></span>
+          <span class="actions">
+            ${isSelf ? "" : `<button data-act="prompt">Prompt</button>`}
+            ${v.https_url ? `<a href="${esc(v.https_url)}" target="_blank" rel="noopener"><button>Open</button></a>` : ""}
+            ${isSelf ? "" : `<button class="danger" data-act="rm">Delete</button>`}
+          </span>
+        </div>
+        ${isSelf ? "" : `<div class="cmd"><code>${esc(ssh)}</code><button data-copy="${esc(ssh)}">copy</button></div>`}
+        <div class="prompt-box ${openPrompts.has(n) ? "open" : ""}">
+          <textarea placeholder="Sent to claude on ${esc(n)} (starts claude if it isn't running)">${esc(drafts[n] || "")}</textarea>
+          <div class="row"><button class="primary" data-act="send">Send</button></div>
+        </div>
+      </div>`;
+    }).join("");
+    markBusy();
+  } catch (e) {
+    el.innerHTML = `<div class="empty err">${esc(e.message)}</div>`;
+  }
+}
+
+function markBusy() {
+  document.querySelectorAll(".vm").forEach(row => {
+    const b = busy.has(row.dataset.name);
+    row.querySelectorAll("button[data-act]").forEach(btn => btn.disabled = b);
+  });
+}
+
+const kindLabel = {start: "Start", prompt: "Prompt", rm: "Delete", login: "Login + start"};
+function ago(t) {
+  const s = Math.round((Date.now() - new Date(t)) / 1000);
+  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s/60)}m ago` : `${Math.round(s/3600)}h ago`;
+}
+
+let lastJobs = "";
+async function loadJobs() {
+  let jobs;
+  try { ({jobs} = await api("GET", "/api/jobs")); } catch { return; }
+  const nowBusy = new Set(jobs.filter(j => j.state === "running").map(j => j.vm));
+  const finished = [...busy].some(v => !nowBusy.has(v));
+  busy = nowBusy;
+  markBusy();
+  if (finished) loadVMs();
+
+  const sig = JSON.stringify(jobs);
+  if (sig === lastJobs) return;
+  lastJobs = sig;
+  const el = $("#jobs");
+  if (!jobs.length) { el.innerHTML = `<div class="empty muted">Nothing yet.</div>`; return; }
+  // Keep a half-typed login code across re-renders.
+  const codes = {}, focused = document.activeElement?.dataset?.job;
+  el.querySelectorAll(".login input").forEach(i => codes[i.dataset.job] = i.value);
+  el.innerHTML = jobs.map(j => {
+    const tail = j.log.split("\n").filter(Boolean).slice(-1)[0] || "";
+    return `<div class="job" data-id="${j.id}">
+      <div class="job-head">
+        <span class="state ${j.state}">${j.state === "login" ? "needs login" : j.state}</span>
+        <strong>${esc(kindLabel[j.kind] || j.kind)} ${esc(j.vm)}</strong>
+        <span class="muted" style="font-size:13px">${ago(j.started)}</span>
+        ${j.state === "failed" && (j.kind === "start" || j.kind === "login") && !busy.has(j.vm)
+          ? `<button data-retry="${j.id}" style="padding:1px 8px; font-size:12px">retry</button>` : ""}
+      </div>
+      ${j.state === "running" ? `<div class="muted" style="font-size:13px; margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(tail)}</div>` : ""}
+      ${j.state === "login" ? `<div class="login">
+        <div>claude on <strong>${esc(j.vm)}</strong> needs a one-time claude.ai login.
+          <a href="${esc(j.login_url)}" target="_blank" rel="noopener">Sign in</a>, then paste the code it shows.</div>
+        <div class="row"><input data-job="${j.id}" placeholder="code" value="${esc(codes[j.id] || "")}" style="flex:1; min-width:200px">
+          <button class="primary" data-login="${j.id}">Continue</button></div>
+        <div class="err"></div>
+      </div>` : ""}
+      <details ${openLogs.has(j.id) ? "open" : ""} data-log="${j.id}"><summary>log</summary><pre class="log">${esc(j.log)}</pre></details>
+    </div>`;
+  }).join("");
+  el.querySelectorAll("details[open] pre").forEach(p => p.scrollTop = p.scrollHeight);
+  if (focused) $(`.login input[data-job="${focused}"]`, el)?.focus();
+}
+
+$("#new").addEventListener("submit", async e => {
+  e.preventDefault();
+  $("#new-err").textContent = "";
+  try {
+    await api("POST", "/api/vms", {name: $("#new-name").value.trim(), prompt: $("#new-prompt").value});
+    $("#new-name").value = ""; $("#new-prompt").value = "";
+    loadJobs();
+  } catch (err) { $("#new-err").textContent = err.message; }
+});
+
+$("#refresh").addEventListener("click", loadVMs);
+
+$("#vms").addEventListener("click", async e => {
+  const copy = e.target.closest("[data-copy]");
+  if (copy) {
+    navigator.clipboard.writeText(copy.dataset.copy);
+    copy.textContent = "copied"; setTimeout(() => copy.textContent = "copy", 1200);
+    return;
+  }
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const row = btn.closest(".vm"), name = row.dataset.name;
+  try {
+    if (btn.dataset.act === "prompt") {
+      const box = $(".prompt-box", row);
+      box.classList.toggle("open");
+      box.classList.contains("open") ? (openPrompts.add(name), $("textarea", box).focus()) : openPrompts.delete(name);
+    } else if (btn.dataset.act === "send") {
+      const ta = $(".prompt-box textarea", row);
+      if (!ta.value.trim()) return;
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/prompt`, {prompt: ta.value});
+      ta.value = ""; openPrompts.delete(name); $(".prompt-box", row).classList.remove("open");
+      loadJobs();
+    } else if (btn.dataset.act === "rm") {
+      if (!confirm(`Back up ${name}'s transcripts, then delete ${name}? This can't be undone.`)) return;
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/rm`, {});
+      loadJobs();
+    }
+  } catch (err) { alert(err.message); }
+});
+
+$("#jobs").addEventListener("toggle", e => {
+  const id = +e.target.dataset.log;
+  e.target.open ? openLogs.add(id) : openLogs.delete(id);
+}, true);
+
+$("#jobs").addEventListener("click", async e => {
+  const retry = e.target.closest("[data-retry]");
+  if (retry) {
+    const j = JSON.parse(lastJobs).find(j => j.id === +retry.dataset.retry);
+    try { await api("POST", "/api/vms", {name: j.vm, prompt: j.prompt || ""}); loadJobs(); }
+    catch (err) { alert(err.message); }
+    return;
+  }
+  const btn = e.target.closest("[data-login]");
+  if (!btn) return;
+  const box = btn.closest(".login"), code = $("input", box).value.trim();
+  if (!code) return;
+  btn.disabled = true;
+  try { await api("POST", `/api/jobs/${btn.dataset.login}/login`, {code}); loadJobs(); }
+  catch (err) { $(".err", box).textContent = err.message; btn.disabled = false; }
+});
+
+loadVMs();
+loadJobs();
+setInterval(loadJobs, 2000);
+setInterval(loadVMs, 30000);
+</script>
+</body>
+</html>

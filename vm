@@ -12,12 +12,15 @@
 # vm-backup, then deletes it.
 #
 # The first run on a new VM logs claude in to claude.ai: the sign-in page opens
-# in Chrome, and you paste the code it shows back into the terminal.
+# in Chrome, and you paste the code it shows back into the terminal. Without a
+# terminal (as under vm-web), vm instead prints the sign-in URL and exits 3;
+# finish with vm login NAME CODE, then run vm NAME again.
 #
 # One-time setup: store a GitHub token and a BuildBuddy API key in the macOS
 # keychain.
 #   security add-generic-password -U -a "$USER" -s vm-github-token -w
 #   security add-generic-password -U -a "$USER" -s buildbuddy-api-key -w
+# Elsewhere, set VM_GITHUB_TOKEN and VM_BUILDBUDDY_API_KEY instead.
 set -euo pipefail
 
 chrome_profile=${VM_CHROME_PROFILE:-Profile 5}
@@ -26,6 +29,13 @@ git_name=${VM_GIT_NAME:-Dan Stowell}
 git_email=${VM_GIT_EMAIL:-dan@buildbuddy.io}
 
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+
+# Every exe.xyz VM presents the same host key (exe.dev's SSH proxy), so pin it
+# once for all names instead of prompting for each new VM.
+ssh_opts=(-o UserKnownHostsFile="$here/exe_known_hosts" -o StrictHostKeyChecking=yes)
+
+# Matches the sign-in URL in claude auth login's output.
+login_url_re='(https://claude\.com/cai/oauth/authorize[^[:space:][:cntrl:]]+)'
 
 case ${1:-} in
   ls)
@@ -51,10 +61,32 @@ case ${1:-} in
     done
     exit $status
     ;;
+  login)
+    # Finishes a login started by a run without a terminal: types CODE into
+    # the waiting claude auth login, then waits for it to take.
+    if (( $# != 3 )); then
+      echo "usage: vm login NAME CODE" >&2
+      exit 2
+    fi
+    host="$2.exe.xyz"
+    ssh "${ssh_opts[@]}" "$host" "tmux send-keys -t vm-login -l $(printf %q "$3") && tmux send-keys -t vm-login Enter"
+    for _ in $(seq 30); do
+      if ssh "${ssh_opts[@]}" "$host" 'claude auth status >/dev/null 2>&1'; then
+        ssh "${ssh_opts[@]}" "$host" 'tmux kill-session -t vm-login 2>/dev/null || true'
+        echo "Logged in."
+        exit 0
+      fi
+      sleep 2
+    done
+    echo "vm: login on $host didn't complete; the code may be wrong or expired. Its screen:" >&2
+    ssh "${ssh_opts[@]}" "$host" 'tmux capture-pane -p -J -t vm-login' >&2 || true
+    ssh "${ssh_opts[@]}" "$host" 'tmux kill-session -t vm-login 2>/dev/null || true'
+    exit 1
+    ;;
 esac
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-  echo "usage: vm NAME [PROMPT] | vm ls | vm rm NAME..." >&2
+  echo "usage: vm NAME [PROMPT] | vm ls | vm rm NAME... | vm login NAME CODE" >&2
   exit 2
 fi
 name=$1
@@ -65,18 +97,16 @@ if (( ${#name} < 5 || ${#name} > 52 )) || [[ ! $name =~ ^[a-z][a-z0-9]*(-[a-z0-9
   echo "vm: invalid name \"$name\": use 5-52 lowercase letters, digits and single hyphens, starting with a letter" >&2
   exit 2
 fi
-if ! gh_token=$(security find-generic-password -a "$USER" -s vm-github-token -w 2>/dev/null); then
-  echo "vm: no GitHub token in keychain; see the setup notes at the top of $here/vm" >&2
+gh_token=${VM_GITHUB_TOKEN:-}
+if [[ -z $gh_token ]] && ! gh_token=$(security find-generic-password -a "$USER" -s vm-github-token -w 2>/dev/null); then
+  echo "vm: no GitHub token in keychain or VM_GITHUB_TOKEN; see the setup notes at the top of $here/vm" >&2
   exit 1
 fi
-if ! bb_api_key=$(security find-generic-password -a "$USER" -s buildbuddy-api-key -w 2>/dev/null); then
-  echo "vm: no BuildBuddy API key in keychain; see the setup notes at the top of $here/vm" >&2
+bb_api_key=${VM_BUILDBUDDY_API_KEY:-}
+if [[ -z $bb_api_key ]] && ! bb_api_key=$(security find-generic-password -a "$USER" -s buildbuddy-api-key -w 2>/dev/null); then
+  echo "vm: no BuildBuddy API key in keychain or VM_BUILDBUDDY_API_KEY; see the setup notes at the top of $here/vm" >&2
   exit 1
 fi
-
-# Every exe.xyz VM presents the same host key (exe.dev's SSH proxy), so pin it
-# once for all names instead of prompting for each new VM.
-ssh_opts=(-o UserKnownHostsFile="$here/exe_known_hosts" -o StrictHostKeyChecking=yes)
 
 if ssh exe.dev ls --json | jq -e --arg n "$name" '.vms[] | select(.vm_name == $n)' >/dev/null; then
   echo "Reusing existing VM $name."
@@ -175,9 +205,9 @@ awk '/^- When asked for a codex review/ { skip = 1; next }
 # Echo login output through, and open the sign-in URL in the right Chrome
 # profile as soon as it appears. Keeps reading to EOF so tee never gets SIGPIPE.
 open_login_url() {
-  local line opened= url_re='(https://claude\.com/cai/oauth/authorize[^[:space:][:cntrl:]]+)'
+  local line opened=
   while IFS= read -r line; do
-    if [[ -z $opened && $line =~ $url_re ]]; then
+    if [[ -z $opened && $line =~ $login_url_re ]]; then
       open -na "Google Chrome" --args --profile-directory="$chrome_profile" "${BASH_REMATCH[1]}"
       opened=1
     fi
@@ -187,8 +217,26 @@ open_login_url() {
 # Remote Control needs a full claude.ai login; setup-token tokens can't do it.
 if ! ssh "${ssh_opts[@]}" "$host" 'claude auth status >/dev/null 2>&1'; then
   if [[ ! -t 0 || ! -t 1 ]]; then
-    echo "vm: claude on $host needs a one-time login; run vm from a terminal" >&2
-    exit 1
+    # No terminal to paste a code into, so leave the login waiting in tmux on
+    # the VM (a wide window, so the URL isn't wrapped) for vm login to finish.
+    ssh "${ssh_opts[@]}" "$host" "tmux kill-session -t vm-login 2>/dev/null
+      tmux new-session -d -s vm-login -x 2000 -y 50 claude auth login --claudeai --email $(printf %q "$claude_email")"
+    url=
+    for _ in $(seq 30); do
+      if [[ $(ssh "${ssh_opts[@]}" "$host" 'tmux capture-pane -p -J -t vm-login') =~ $login_url_re ]]; then
+        url=${BASH_REMATCH[1]}
+        break
+      fi
+      sleep 1
+    done
+    if [[ -z $url ]]; then
+      echo "vm: claude auth login on $host never showed a sign-in URL" >&2
+      exit 1
+    fi
+    echo "vm: claude on $host needs a one-time login."
+    echo "vm: sign in at $url"
+    echo "vm: then run: vm login $name CODE, and vm $name again"
+    exit 3
   fi
   echo "Logging claude in to claude.ai (opening Chrome: $chrome_profile)..."
   ssh "${ssh_opts[@]}" -t "$host" claude auth login --claudeai --email "$claude_email" | tee >(open_login_url)

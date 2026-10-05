@@ -1,0 +1,19 @@
+# Runs vm-web on port 8000, private behind exe.dev's proxy at
+# https://VMNAME.exe.xyz:8000/. Install:
+#   sudo cp ~/dream/web/vm-web.service /etc/systemd/system/
+#   sudo systemctl enable --now vm-web
+[Unit]
+Description=vm web app
+After=network-online.target
+
+[Service]
+User=exedev
+WorkingDirectory=/home/exedev/dream/web
+EnvironmentFile=/home/exedev/.config/vm/secrets
+ExecStartPre=/usr/local/bin/go build -o vm-web .
+ExecStart=/home/exedev/dream/web/vm-web -addr :8000
+Restart=on-failure
+Environment=HOME=/home/exedev GOCACHE=/home/exedev/.cache/go-build
+
+[Install]
+WantedBy=multi-user.target
