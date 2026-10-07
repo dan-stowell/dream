@@ -22,14 +22,20 @@ each on a branch named after the VM.
 - Before pushing, catch formatting and lint issues with
   `bb run --config=remote -- //tools/lint` in buildbuddy, or
   `bb run --config=remote -- @com_github_buildbuddy_io_buildbuddy//tools/lint`
-  in buildbuddy-internal. Add `-fix` to fix what it can.
+  in buildbuddy-internal. Add `-fix` to fix what it can. Run it right here on
+  the VM, not under `bb remote`, and with `--config=remote` rather than
+  `remote-minimal` or `cache`, so the linters build on RBE and only the lint
+  run itself happens locally. Don't hand-run binaries out of its runfiles.
+- Give each test file its own test target. Don't combine separate test files
+  (suites) into one target.
 - `gh` is logged in as Dan's own GitHub account, so anything done with it
   (pushes, PRs, comments) shows up as Dan.
 - Commit and push often.
-- When asked for a codex review, run `codex exec --sandbox read-only "PROMPT"`
-  in the repo, with a prompt that says what to review (e.g. the branch's
-  changes from `git diff master...HEAD`, or the uncommitted changes) and what
-  to look for. Prefer it to `codex review`, which can't take custom
-  instructions together with `--base`. `-o FILE` saves codex's final message.
-  Codex is already configured, so pass no model or provider flags. Only do
-  this when asked, and don't ask codex to request reviews itself.
+- After every push, ask codex for a review: run
+  `codex exec --sandbox read-only "PROMPT"` in the repo, with a prompt that
+  says what to review (e.g. the branch's changes from `git diff master...HEAD`)
+  and what to look for, then weigh and address what it finds. Prefer it to
+  `codex review`, which can't take custom instructions together with `--base`.
+  `-o FILE` saves codex's final message. Codex is already configured (it uses
+  gpt-6-astra), so pass no model or provider flags. Don't ask codex to request
+  reviews itself.

@@ -161,7 +161,7 @@ sudo ln -sf bb /usr/local/bin/bazelisk
 # Point codex at the exe.dev LLM integration, which carries Dan's ChatGPT sub.
 mkdir -p ~/.codex
 cat > ~/.codex/config.toml <<'TOML'
-model = "gpt-5.5"
+model = "gpt-6-astra"
 model_provider = "exe-llm"
 
 [model_providers.exe-llm]
@@ -195,7 +195,7 @@ ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude ~/.config/shelley &&
 # Codex gets the same guidance, minus the bullet about asking codex for
 # reviews, after the exe.dev note its AGENTS.md ships with. That note is set
 # aside on the first run so later runs don't stack copies of the guidance.
-awk '/^- When asked for a codex review/ { skip = 1; next }
+awk '/^- After every push, ask codex/ { skip = 1; next }
      /^[-#]/ { skip = 0 }
      !skip' "$here/vm-CLAUDE.md" |
   ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.codex && cd ~/.codex &&
