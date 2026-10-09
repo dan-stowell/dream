@@ -8,7 +8,8 @@
 # AGENTS.md. PROMPT, if given, is sent to claude: as its first message in a new
 # session, or pasted into the session that's already running.
 #
-# vm ls lists your VMs. vm rm NAME... backs up each VM's transcripts with
+# vm ls lists your VMs. vm backup [NAME...] runs vm-backup now, rather than
+# waiting for its hourly run. vm rm NAME... backs up each VM's transcripts with
 # vm-backup, then deletes it.
 #
 # The first run on a new VM logs claude in to claude.ai: the sign-in page opens
@@ -41,6 +42,10 @@ case ${1:-} in
   ls)
     shift
     exec ssh exe.dev ls "$@"
+    ;;
+  backup)
+    shift
+    exec "$here/vm-backup" "$@"
     ;;
   rm)
     shift
@@ -86,7 +91,7 @@ case ${1:-} in
 esac
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-  echo "usage: vm NAME [PROMPT] | vm ls | vm rm NAME... | vm login NAME CODE" >&2
+  echo "usage: vm NAME [PROMPT] | vm ls | vm backup [NAME...] | vm rm NAME... | vm login NAME CODE" >&2
   exit 2
 fi
 name=$1
