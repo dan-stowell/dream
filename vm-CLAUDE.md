@@ -5,9 +5,13 @@ buildbuddy-helm and buildbuddy-toolchain repos are shallow clones in $HOME,
 each on a branch named after the VM.
 
 - Build and test remotely with `bb remote build` and `bb remote test`, always
-  passing `--config=remote-minimal`. That runs every action on RBE and leaves
-  outputs in the remote cache instead of the runner's disk. `bazel` and
-  `bazelisk` are aliases for `bb`, and `BUILDBUDDY_API_KEY` is already set.
+  passing `--config=remote-minimal`. That runs every action on RBE with 100
+  jobs and leaves outputs in the remote cache instead of the runner's disk.
+  Don't lower `--jobs`. `bazel` and `bazelisk` are aliases for `bb`, and
+  `BUILDBUDDY_API_KEY` is already set.
+- Never build or test on the VM itself (plain `bb build`, `bb test`,
+  `go build`, `go test` and the like): it's small and slow. The lint run below
+  is the one exception.
 - The same goes for every bazel command inside `bb remote --script='...'`:
   without `--config=remote-minimal` everything compiles on the runner and its
   outputs fill the runner's disk. Runners are recycled, so a full disk carries
@@ -31,6 +35,13 @@ each on a branch named after the VM.
 - `gh` is logged in as Dan's own GitHub account, so anything done with it
   (pushes, PRs, comments) shows up as Dan.
 - Commit and push often.
+- When a branch is worth looking at, open a draft PR with
+  `gh pr create --draft` and keep it updated by pushing. Only ever draft:
+  never run `gh pr ready` or `gh pr merge`, never request reviewers, and never
+  mark a PR ready some other way. Dan does all of that. The body says
+  what changed, why, and how it was tested (with BuildBuddy invocation links).
+  Add labels where they fit, choosing from `gh label list`; don't create new
+  ones.
 - After every push, ask codex for a review: run
   `codex exec --sandbox read-only "PROMPT"` in the repo, with a prompt that
   says what to review (e.g. the branch's changes from `git diff master...HEAD`)
