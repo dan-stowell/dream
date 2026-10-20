@@ -192,20 +192,24 @@ EOF
 ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup") _ $(printf '%q ' "$name" "$git_name" "$git_email")" \
   <<<"$gh_token"$'\n'"$bb_api_key"
 
-# Guidance for every claude and Shelley on the VM. Rewritten on each run, so
-# edit vm-CLAUDE.md here rather than on the VM.
-ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude ~/.config/shelley &&
-  tee ~/.claude/CLAUDE.md >~/.config/shelley/AGENTS.md' <"$here/vm-CLAUDE.md"
-
-# Codex gets the same guidance, minus the bullet about asking codex for
+# Codex gets the guidance below, minus the bullet about asking codex for
 # reviews, after the exe.dev note its AGENTS.md ships with. That note is set
 # aside on the first run so later runs don't stack copies of the guidance.
+# Newer images make ~/.codex/AGENTS.md and ~/.claude/CLAUDE.md symlinks to
+# Shelley's AGENTS.md, so each is replaced with a file of its own, and a note
+# that an earlier vm run already overwrote through the symlink is dropped.
 awk '/^- After every push, ask codex/ { skip = 1; next }
      /^[-#]/ { skip = 0 }
      !skip' "$here/vm-CLAUDE.md" |
   ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.codex && cd ~/.codex &&
     { [ -e AGENTS.exe-dev.md ] || cp AGENTS.md AGENTS.exe-dev.md 2>/dev/null || : >AGENTS.exe-dev.md; } &&
-    { cat AGENTS.exe-dev.md; echo; cat; } >AGENTS.md'
+    { [ "$(head -1 AGENTS.exe-dev.md)" != "# VM notes" ] || : >AGENTS.exe-dev.md; } &&
+    rm -f AGENTS.md && { cat AGENTS.exe-dev.md; echo; cat; } >AGENTS.md'
+
+# Guidance for every claude and Shelley on the VM. Rewritten on each run, so
+# edit vm-CLAUDE.md here rather than on the VM.
+ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude ~/.config/shelley &&
+  rm -f ~/.claude/CLAUDE.md && tee ~/.claude/CLAUDE.md >~/.config/shelley/AGENTS.md' <"$here/vm-CLAUDE.md"
 
 # Echo login output through, and open the sign-in URL in the right Chrome
 # profile as soon as it appears. Keeps reading to EOF so tee never gets SIGPIPE.
