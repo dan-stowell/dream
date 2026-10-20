@@ -43,9 +43,10 @@ each on a branch named after the VM.
   Add labels where they fit, choosing from `gh label list`; don't create new
   ones.
 - After every push, ask codex for a review: run
-  `codex exec --sandbox read-only "PROMPT"` in the repo, with a prompt that
-  says what to review (e.g. the branch's changes from `git diff master...HEAD`)
-  and what to look for, then weigh and address what it finds. Prefer it to
+  `codex exec --sandbox read-only "PROMPT" </dev/null` in the repo (without
+  the `</dev/null` it waits on stdin), with a prompt that says what to review
+  (e.g. the branch's changes from `git diff master...HEAD`) and what to look
+  for, then weigh and address what it finds. Prefer it to
   `codex review`, which can't take custom instructions together with `--base`.
   `-o FILE` saves codex's final message. Codex is already configured (it uses
   gpt-6-astra), so pass no model or provider flags. Don't ask codex to request

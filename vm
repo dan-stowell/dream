@@ -173,6 +173,15 @@ model_provider = "exe-llm"
 name = "exe-llm"
 base_url = "https://llm.int.exe.xyz/v1"
 TOML
+# Let codex reach RBE from its workspace-write sandbox: bb needs the network
+# and a writable ~/.cache, which has to exist before the sandbox can mount it.
+mkdir -p ~/.cache
+cat >> ~/.codex/config.toml <<TOML
+
+[sandbox_workspace_write]
+network_access = true
+writable_roots = ["$HOME/.cache"]
+TOML
 
 for repo in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain; do
   if [ ! -d ~/"$repo"/.git ]; then
@@ -210,6 +219,15 @@ awk '/^- After every push, ask codex/ { skip = 1; next }
 # edit vm-CLAUDE.md here rather than on the VM.
 ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude ~/.config/shelley &&
   rm -f ~/.claude/CLAUDE.md && tee ~/.claude/CLAUDE.md >~/.config/shelley/AGENTS.md' <"$here/vm-CLAUDE.md"
+
+# The main claude coordinates the subagents in vm-agents rather than doing the
+# work itself. Its instructions are appended to its system prompt, not put in
+# CLAUDE.md, so the subagents don't read them too.
+COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$here" -cf - vm-agents vm-coordinator.md |
+  ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude/agents ~/.config/vm &&
+    tmp=$(mktemp -d) && tar -C "$tmp" -xf - &&
+    cp "$tmp"/vm-agents/*.md ~/.claude/agents/ &&
+    cp "$tmp"/vm-coordinator.md ~/.config/vm/coordinator.md && rm -rf "$tmp"'
 
 # Echo login output through, and open the sign-in URL in the right Chrome
 # profile as soon as it appears. Keeps reading to EOF so tee never gets SIGPIPE.
@@ -276,6 +294,7 @@ if ! tmux has-session -t claude 2>/dev/null; then
 
   tmux new-session -d -s claude -c "$HOME"
   cmd="claude --dangerously-skip-permissions --remote-control $name"
+  cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md)"'
   [ -z "$prompt" ] || cmd+=" $(printf %q "$prompt")"
   tmux send-keys -t claude "$cmd" Enter
 elif [ -n "$prompt" ]; then
