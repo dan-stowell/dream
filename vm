@@ -117,7 +117,7 @@ if ssh exe.dev ls --json | jq -e --arg n "$name" '.vms[] | select(.vm_name == $n
   echo "Reusing existing VM $name."
 else
   echo "Creating $name..."
-  ssh exe.dev new --name "$name" --cpu 2 --memory 4GB --disk 25GB --no-email
+  ssh exe.dev new --name "$name" --cpu 8 --memory 32GB --disk 100GB --no-email
 fi
 
 echo "Waiting for SSH..."
