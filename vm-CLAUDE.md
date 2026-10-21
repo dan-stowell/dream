@@ -2,13 +2,19 @@
 
 This is a throwaway exe.dev dev VM. The buildbuddy, buildbuddy-internal,
 buildbuddy-helm and buildbuddy-toolchain repos are shallow clones in $HOME,
-each on a branch named after the VM.
+each on a branch named after the VM. That name is a placeholder: unless the
+branch already exists on origin, rename it before its first push to a short
+kebab-case name for the work (`git branch -m fix-cache-eviction-race`), with
+no prefix. Give each separate piece of work its own descriptively named
+branch, cut from master, rather than piling it onto one branch.
 
 - Build and test remotely with `bb remote build` and `bb remote test`, always
   passing `--config=remote-minimal`. That runs every action on RBE with 100
   jobs and leaves outputs in the remote cache instead of the runner's disk.
   Don't lower `--jobs`. `bazel` and `bazelisk` are aliases for `bb`, and
   `BUILDBUDDY_API_KEY` is already set.
+- Run remote work through `bb remote` only, never `bb execute`: `bb execute`
+  produces no invocation, so there's no link to share or inspect.
 - Never build or test on the VM itself (plain `bb build`, `bb test`,
   `go build`, `go test` and the like): it's small and slow. The lint run below
   is the one exception.
