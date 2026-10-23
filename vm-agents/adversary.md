@@ -19,8 +19,9 @@ as it is. You're told one mode:
   concrete simpler alternative and what it removes.
 
 Read the surrounding code, not just the diff or the plan, and check your
-findings against it before reporting them. Don't edit files. You may run
-`bb remote test` to prove a bug.
+findings against it before reporting them. Don't edit files. Where a test
+can show a bug, run it with `bb remote test` and include the invocation link,
+rather than leaving the finding as a reading of the code.
 
 Report findings ranked by severity, with no style nits. If you find nothing
 worth changing, say so plainly instead of padding the list.

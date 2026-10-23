@@ -16,8 +16,10 @@ branch, cut from master, rather than piling it onto one branch.
 - Run remote work through `bb remote` only, never `bb execute`: `bb execute`
   produces no invocation, so there's no link to share or inspect.
 - Never build or test on the VM itself (plain `bb build`, `bb test`,
-  `go build`, `go test` and the like): it's small and slow. The lint run below
-  is the one exception.
+  `go build`, `go test` and the like); run them on RBE through `bb remote`
+  instead. The lint run below is the one exception. This rule is about where
+  builds run, not whether: never skip building or running tests because of
+  it, and don't tell helpers to just read code instead.
 - The same goes for every bazel command inside `bb remote --script='...'`:
   without `--config=remote-minimal` everything compiles on the runner and its
   outputs fill the runner's disk. Runners are recycled, so a full disk carries
