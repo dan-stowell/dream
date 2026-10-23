@@ -48,6 +48,11 @@ branch, cut from master, rather than piling it onto one branch.
   what changed, why, and how it was tested (with BuildBuddy invocation links).
   Add labels where they fit, choosing from `gh label list`; don't create new
   ones.
+- Keep issues short: a clear, concrete title and at most 2-3 one-line
+  bullets in the body. Label every issue you open `agent-written` (create it
+  with `gh label create agent-written` if the repo lacks it; that's the one
+  label you may create), plus any other labels from `gh label list` that fit.
+- Never reply to issue or PR comments written by humans; Dan answers those.
 - After every push, ask codex for a review: run
   `codex exec --sandbox read-only "PROMPT" </dev/null` in the repo (without
   the `</dev/null` it waits on stdin), with a prompt that says what to review
