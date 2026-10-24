@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# vm NAME [PROMPT]: create an exe.dev VM (or reuse an existing one) and attach
+# vm [--repo OWNER/REPO] NAME [PROMPT]: create an exe.dev VM (or reuse an
+# existing one) and attach
 # to a tmux session running a logged-in claude (with Remote Control) in $HOME.
 # The VM gets the bb CLI (also as bazel and bazelisk), BUILDBUDDY_API_KEY,
 # codex on Dan's ChatGPT sub, and shallow clones of the buildbuddy repos on a
 # branch named NAME (tracking the remote branch if it exists), plus the
-# guidance in vm-CLAUDE.md as claude's user-level CLAUDE.md and Shelley's
+# guidance in vm-CLAUDE*.md as claude's user-level CLAUDE.md and Shelley's
 # AGENTS.md. PROMPT, if given, is sent to claude: as its first message in a new
 # session, or pasted into the session that's already running.
+#
+# With --repo, the VM instead works on OWNER/REPO through the exe.dev GitHub
+# integration that covers it: it gets no GitHub token, and clones that
+# integration's repos rather than the buildbuddy ones. The VM is tagged with
+# the integration's name, so later runs of plain vm NAME keep it in that mode.
+# Set up the integration once with
+#   ssh exe.dev int add github --name OWNER-REPO --repository OWNER/REPO --attach auto:all
 #
 # vm ls lists your VMs. vm backup [NAME...] runs vm-backup now, rather than
 # waiting for its hourly run. vm rm NAME... backs up each VM's transcripts with
@@ -90,8 +98,14 @@ case ${1:-} in
     ;;
 esac
 
-if [[ $# -lt 1 || $# -gt 2 ]]; then
-  echo "usage: vm NAME [PROMPT] | vm ls | vm backup [NAME...] | vm rm NAME... | vm login NAME CODE" >&2
+repo=
+if [[ ${1:-} == --repo ]]; then
+  repo=${2:-}
+  shift
+  (( $# == 0 )) || shift
+fi
+if [[ $# -lt 1 || $# -gt 2 || ( -n $repo && $repo != */* ) ]]; then
+  echo "usage: vm [--repo OWNER/REPO] NAME [PROMPT] | vm ls | vm backup [NAME...] | vm rm NAME... | vm login NAME CODE" >&2
   exit 2
 fi
 name=$1
@@ -102,22 +116,54 @@ if (( ${#name} < 5 || ${#name} > 52 )) || [[ ! $name =~ ^[a-z][a-z0-9]*(-[a-z0-9
   echo "vm: invalid name \"$name\": use 5-52 lowercase letters, digits and single hyphens, starting with a letter" >&2
   exit 2
 fi
-gh_token=${VM_GITHUB_TOKEN:-}
-if [[ -z $gh_token ]] && ! gh_token=$(security find-generic-password -a "$USER" -s vm-github-token -w 2>/dev/null); then
-  echo "vm: no GitHub token in keychain or VM_GITHUB_TOKEN; see the setup notes at the top of $here/vm" >&2
-  exit 1
-fi
 bb_api_key=${VM_BUILDBUDDY_API_KEY:-}
 if [[ -z $bb_api_key ]] && ! bb_api_key=$(security find-generic-password -a "$USER" -s buildbuddy-api-key -w 2>/dev/null); then
   echo "vm: no BuildBuddy API key in keychain or VM_BUILDBUDDY_API_KEY; see the setup notes at the top of $here/vm" >&2
   exit 1
 fi
 
-if ssh exe.dev ls --json | jq -e --arg n "$name" '.vms[] | select(.vm_name == $n)' >/dev/null; then
-  echo "Reusing existing VM $name."
+vm_json=$(ssh exe.dev ls --json | jq -c --arg n "$name" '.vms[] | select(.vm_name == $n)')
+vm_tags=$(jq -c '.tags // []' <<<"${vm_json:-null}")
+
+# A VM tagged with the name of a GitHub integration works on that
+# integration's repos. Integrations are only looked up when they could matter,
+# so plain vm NAME on an untagged VM costs no extra round trip.
+integration= repos=()
+if [[ -n $repo || $vm_tags != '[]' ]]; then
+  integration=$(ssh exe.dev int list --json |
+    jq -r --arg repo "$repo" --argjson tags "$vm_tags" '
+      [.[] | select(.type == "github") |
+        select(if $repo != "" then (.config.repositories | index($repo))
+               else (.name as $n | $tags | index($n)) end)] | first // empty |
+      [.name] + .config.repositories | @tsv')
+  if [[ -n $integration ]]; then
+    IFS=$'\t' read -ra repos <<<"$integration"
+    integration=${repos[0]}
+    repos=("${repos[@]:1}")
+  elif [[ -n $repo ]]; then
+    echo "vm: no exe.dev GitHub integration covers $repo; add one with" >&2
+    echo "  ssh exe.dev int add github --name ${repo//\//-} --repository $repo --attach auto:all" >&2
+    exit 1
+  fi
+fi
+
+if [[ -z $integration ]]; then
+  gh_token=${VM_GITHUB_TOKEN:-}
+  if [[ -z $gh_token ]] && ! gh_token=$(security find-generic-password -a "$USER" -s vm-github-token -w 2>/dev/null); then
+    echo "vm: no GitHub token in keychain or VM_GITHUB_TOKEN; see the setup notes at the top of $here/vm" >&2
+    exit 1
+  fi
+fi
+
+if [[ -n $vm_json ]]; then
+  if [[ -n $repo ]] && ! jq -e --arg t "$integration" 'index($t)' <<<"$vm_tags" >/dev/null; then
+    echo "vm: $name already exists without the $integration tag, so it may hold a GitHub token; pick a new name" >&2
+    exit 1
+  fi
+  echo "Reusing existing VM $name${integration:+ ($integration)}."
 else
-  echo "Creating $name..."
-  ssh exe.dev new --name "$name" --cpu 8 --memory 32GB --disk 100GB --no-email
+  echo "Creating $name${integration:+ ($integration)}..."
+  ssh exe.dev new --name "$name" --cpu 8 --memory 32GB --disk 100GB --no-email ${integration:+--tag "$integration"}
 fi
 
 echo "Waiting for SSH..."
@@ -138,26 +184,39 @@ fi
 remote_setup=$(cat <<'EOF'
 set -euo pipefail
 branch=$1 git_name=$2 git_email=$3
+shift 3
+# Any remaining arguments are OWNER/REPO repos reached through the exe.dev
+# GitHub integration, in place of a token and the buildbuddy repos.
+repos=("$@")
 
-IFS= read -r gh_token
+if (( ${#repos[@]} == 0 )); then
+  IFS= read -r gh_token
+  gh auth login --hostname github.com --git-protocol https --with-token <<<"$gh_token"
+  gh auth setup-git --hostname github.com
+fi
 IFS= read -r bb_api_key
-gh auth login --hostname github.com --git-protocol https --with-token <<<"$gh_token"
-gh auth setup-git --hostname github.com
 git config --global user.name "$git_name"
 git config --global user.email "$git_email"
 
 # tmux starts login shells, which read ~/.profile.
 mkdir -p ~/.config/vm
-(umask 077 && printf 'export BUILDBUDDY_API_KEY=%q\n' "$bb_api_key" > ~/.config/vm/env)
+(umask 077 && {
+  printf 'export BUILDBUDDY_API_KEY=%q\n' "$bb_api_key"
+  (( ${#repos[@]} == 0 )) || echo 'export GH_HOST=github.int.exe.xyz'
+} > ~/.config/vm/env)
 grep -q 'config/vm/env' ~/.profile || echo '[ -f ~/.config/vm/env ] && . ~/.config/vm/env' >> ~/.profile
 
 if ! command -v bb >/dev/null; then
   echo "Installing bb..."
   arch=$(uname -m)
   [ "$arch" = aarch64 ] && arch=arm64
+  # Found from the latest release's redirect rather than with gh, which may
+  # have no token to log in with.
+  version=$(curl -fsSI https://github.com/buildbuddy-io/bazel/releases/latest |
+    sed -n 's|^location: .*/tag/\([^[:space:]]*\).*|\1|ip')
   tmp=$(mktemp -d)
-  gh release download --repo buildbuddy-io/bazel --pattern "bazel-*-linux-$arch" --dir "$tmp"
-  sudo install -m 0755 "$tmp"/bazel-*-linux-"$arch" /usr/local/bin/bb
+  curl -fsSL -o "$tmp/bb" "https://github.com/buildbuddy-io/bazel/releases/download/$version/bazel-$version-linux-$arch"
+  sudo install -m 0755 "$tmp/bb" /usr/local/bin/bb
   rm -rf "$tmp"
 fi
 sudo ln -sf bb /usr/local/bin/bazel
@@ -183,10 +242,30 @@ network_access = true
 writable_roots = ["$HOME/.cache"]
 TOML
 
-for repo in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain; do
+if (( ${#repos[@]} == 0 )); then
+  urls=()
+  for repo in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain; do
+    urls+=("https://github.com/buildbuddy-io/$repo.git")
+  done
+else
+  urls=("${repos[@]/#/https://github.int.exe.xyz/}")
+  urls=("${urls[@]/%/.git}")
+fi
+for url in "${urls[@]}"; do
+  repo=$(basename "$url" .git)
   if [ ! -d ~/"$repo"/.git ]; then
     echo "Cloning $repo..."
-    gh repo clone "buildbuddy-io/$repo" ~/"$repo" -- --quiet --depth 1 --branch master
+    git clone --quiet --depth 1 "$url" ~/"$repo"
+    # bb remote's runners clone from origin's fetch URL, and can't reach
+    # github.int.exe.xyz, so a public repo fetches from github.com and only
+    # pushes through the integration.
+    slug=${url#https://github.int.exe.xyz/}
+    slug=${slug%.git}
+    if [[ $url == https://github.int.exe.xyz/* ]] &&
+      [ "$(GH_HOST=github.int.exe.xyz gh api "repos/$slug" --jq .private 2>/dev/null)" = false ]; then
+      git -C ~/"$repo" remote set-url --push origin "$url"
+      git -C ~/"$repo" remote set-url origin "https://github.com/$slug.git"
+    fi
     if git -C ~/"$repo" ls-remote --exit-code --heads origin "$branch" >/dev/null; then
       git -C ~/"$repo" remote set-branches --add origin "$branch"
       git -C ~/"$repo" fetch --quiet --depth 1 origin "$branch"
@@ -198,10 +277,21 @@ for repo in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain;
 done
 EOF
 )
-ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup") _ $(printf '%q ' "$name" "$git_name" "$git_email")" \
-  <<<"$gh_token"$'\n'"$bb_api_key"
+secrets=$bb_api_key
+[[ -n $integration ]] || secrets=$gh_token$'\n'$secrets
+ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup") _ $(printf '%q ' "$name" "$git_name" "$git_email" "${repos[@]}")" \
+  <<<"$secrets"
 
-# Codex gets the guidance below, minus the bullet about asking codex for
+# Guidance for every agent on the VM: the shared notes, then a Repos section
+# for the buildbuddy repos or for the integration's repos.
+if [[ -n $integration ]]; then
+  repo_list=$(printf '`%s`, ' "${repos[@]}")
+  guidance=$(cat "$here/vm-CLAUDE.md"; echo; sed "s|REPOS|${repo_list%, }|" "$here/vm-CLAUDE-github.md")
+else
+  guidance=$(cat "$here/vm-CLAUDE.md"; echo; cat "$here/vm-CLAUDE-buildbuddy.md")
+fi
+
+# Codex gets the guidance, minus the bullet about asking codex for
 # reviews, after the exe.dev note its AGENTS.md ships with. That note is set
 # aside on the first run so later runs don't stack copies of the guidance.
 # Newer images make ~/.codex/AGENTS.md and ~/.claude/CLAUDE.md symlinks to
@@ -209,16 +299,16 @@ ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup") _ $(printf '%
 # that an earlier vm run already overwrote through the symlink is dropped.
 awk '/^- After every push, ask codex/ { skip = 1; next }
      /^[-#]/ { skip = 0 }
-     !skip' "$here/vm-CLAUDE.md" |
+     !skip' <<<"$guidance" |
   ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.codex && cd ~/.codex &&
     { [ -e AGENTS.exe-dev.md ] || cp AGENTS.md AGENTS.exe-dev.md 2>/dev/null || : >AGENTS.exe-dev.md; } &&
     { [ "$(head -1 AGENTS.exe-dev.md)" != "# VM notes" ] || : >AGENTS.exe-dev.md; } &&
     rm -f AGENTS.md && { cat AGENTS.exe-dev.md; echo; cat; } >AGENTS.md'
 
-# Guidance for every claude and Shelley on the VM. Rewritten on each run, so
-# edit vm-CLAUDE.md here rather than on the VM.
+# Every claude and Shelley gets it whole. Rewritten on each run, so edit the
+# vm-CLAUDE*.md files here rather than on the VM.
 ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude ~/.config/shelley &&
-  rm -f ~/.claude/CLAUDE.md && tee ~/.claude/CLAUDE.md >~/.config/shelley/AGENTS.md' <"$here/vm-CLAUDE.md"
+  rm -f ~/.claude/CLAUDE.md && tee ~/.claude/CLAUDE.md >~/.config/shelley/AGENTS.md' <<<"$guidance"
 
 # The main claude coordinates the subagents in vm-agents rather than doing the
 # work itself. Its instructions are appended to its system prompt, not put in
