@@ -142,7 +142,7 @@ if [[ -n $repo || $vm_tags != '[]' ]]; then
     repos=("${repos[@]:1}")
   elif [[ -n $repo ]]; then
     echo "vm: no exe.dev GitHub integration covers $repo; add one with" >&2
-    echo "  ssh exe.dev int add github --name ${repo//\//-} --repository $repo --attach auto:all" >&2
+    echo "  ssh exe.dev int add github --name ${repo//[\/_]/-} --repository $repo --attach auto:all" >&2
     exit 1
   fi
 fi
