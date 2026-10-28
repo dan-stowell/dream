@@ -313,11 +313,26 @@ ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude ~/.config/shelley &&
 # The main claude coordinates the subagents in vm-agents rather than doing the
 # work itself. Its instructions are appended to its system prompt, not put in
 # CLAUDE.md, so the subagents don't read them too.
-COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$here" -cf - vm-agents vm-coordinator.md |
+COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$here" -cf - vm-agents vm-coordinator.md vm-coordinator-shelley.md |
   ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude/agents ~/.config/vm &&
     tmp=$(mktemp -d) && tar -C "$tmp" -xf - &&
     cp "$tmp"/vm-agents/*.md ~/.claude/agents/ &&
-    cp "$tmp"/vm-coordinator.md ~/.config/vm/coordinator.md && rm -rf "$tmp"'
+    cp "$tmp"/vm-coordinator.md ~/.config/vm/coordinator.md &&
+    cp "$tmp"/vm-coordinator-shelley.md ~/.config/vm/coordinator-shelley.md && rm -rf "$tmp"'
+
+# Shelley coordinates too, when claude isn't available. Its system-prompt hook
+# runs for subagents as well, so it adds the coordinator notes, plus how the
+# helpers map onto Shelley's subagents, only to prompts that aren't a subagent's.
+ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.config/shelley/hooks &&
+  cat >~/.config/shelley/hooks/system-prompt && chmod +x ~/.config/shelley/hooks/system-prompt' <<'EOF'
+#!/bin/sh
+prompt=$(cat)
+printf '%s' "$prompt"
+case $prompt in
+  *"You are a subagent of Shelley"*) ;;
+  *) printf '\n\n'; cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/coordinator-shelley.md ;;
+esac
+EOF
 
 # Echo login output through, and open the sign-in URL in the right Chrome
 # profile as soon as it appears. Keeps reading to EOF so tee never gets SIGPIPE.
