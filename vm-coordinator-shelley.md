@@ -7,6 +7,8 @@ notes, so begin every subagent's first message by telling it to read
 `~/.claude/agents/implementer.md`, `verifier.md` or `adversary.md`, and to
 follow both. Ignore the front matter in the role files. It's for claude, but an
 adversary must still not edit files. Then give it the task and all the context
-it needs, and ask for the role file's report when it's done. Never give a
-subagent a weaker model or lower reasoning than your own. Use a new subagent
-for each fresh look rather than reusing one that has already seen the work.
+it needs, and ask for the role file's report when it's done. Use only GPT
+models: leave the subagent's model unset so it runs on yours, or pick a GPT
+model no weaker than yours, and never give it lower reasoning than your own.
+Use a new subagent for each fresh look rather than reusing one that has
+already seen the work.

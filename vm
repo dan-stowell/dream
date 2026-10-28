@@ -36,6 +36,7 @@ chrome_profile=${VM_CHROME_PROFILE:-Profile 5}
 claude_email=${VM_CLAUDE_EMAIL:-dstowell@gmail.com}
 git_name=${VM_GIT_NAME:-Dan Stowell}
 git_email=${VM_GIT_EMAIL:-dan@buildbuddy.io}
+shelley_model=${VM_SHELLEY_MODEL:-gpt-6.1-sol}
 
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
@@ -333,6 +334,22 @@ case $prompt in
   *) printf '\n\n'; cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/coordinator-shelley.md ;;
 esac
 EOF
+
+# Shelley's default model is set in exe.dev's own shelley.json, so a drop-in
+# adds -default-model to the unit's ExecStart instead. Shelley is restarted
+# only when the drop-in changes, so a rerun doesn't interrupt its work.
+ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q '
+  set -euo pipefail
+  exec_start=$(grep "^ExecStart=" /etc/systemd/system/shelley.service)
+  conf=$(printf "[Service]\nExecStart=\n%s\n" "${exec_start/ serve / -default-model $1 serve }")
+  dropin=/etc/systemd/system/shelley.service.d/vm.conf
+  if [ "$(cat "$dropin" 2>/dev/null)" != "$conf" ]; then
+    sudo mkdir -p "${dropin%/*}"
+    sudo tee "$dropin" <<<"$conf" >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl try-restart shelley.service
+  fi
+') _ $(printf %q "$shelley_model")"
 
 # Echo login output through, and open the sign-in URL in the right Chrome
 # profile as soon as it appears. Keeps reading to EOF so tee never gets SIGPIPE.
