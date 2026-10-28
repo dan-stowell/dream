@@ -244,7 +244,7 @@ TOML
 
 if (( ${#repos[@]} == 0 )); then
   urls=()
-  for repo in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain; do
+  for repo in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain podman-static; do
     urls+=("https://github.com/buildbuddy-io/$repo.git")
   done
 else

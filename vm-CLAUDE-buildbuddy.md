@@ -1,7 +1,7 @@
 ## Repos
 
-- buildbuddy, buildbuddy-internal, buildbuddy-helm and buildbuddy-toolchain,
-  all from buildbuddy-io, with master as the default branch.
+- buildbuddy, buildbuddy-internal, buildbuddy-helm, buildbuddy-toolchain and
+  podman-static, all from buildbuddy-io, with master as the default branch.
 - Before pushing, catch formatting and lint issues with
   `bb run --config=remote -- //tools/lint` in buildbuddy, or
   `bb run --config=remote -- @com_github_buildbuddy_io_buildbuddy//tools/lint`
