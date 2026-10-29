@@ -36,6 +36,10 @@ branch, rather than piling it onto one branch.
   `--test_filter=Name` prints the failed test output. See `bb view --help`.
 - Give each test file its own test target. Don't combine separate test files
   (suites) into one target.
+- Write Go tests in a separate `_test` package: `yo_test.go` next to `yo.go`
+  (`package yo`) declares `package yo_test` and tests through the exported
+  API. Only use the internal package when a test truly can't work without
+  private access, which is almost never.
 - Commit and push often.
 - When a branch is worth looking at, open a draft PR with
   `gh pr create --draft` and keep it updated by pushing. Only ever draft:
