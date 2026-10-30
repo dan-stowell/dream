@@ -39,7 +39,11 @@ branch, rather than piling it onto one branch.
 - A Go package is one directory holding one implementation file and one test
   file: `path/to/yo/yo.go` and `path/to/yo/yo_test.go`, with a `go_library`
   and a `go_test` target for them in `path/to/yo/BUILD`. Never put tests in
-  a new directory or package of their own. `yo_test.go` declares
+  a new directory or package of their own. Add new tests to the existing
+  `yo_test.go` rather than creating another test file (e.g. tests for
+  `platform.go` go in `platform_test.go`, not a new
+  `set_container_image_test.go`), and add new code to `yo.go` rather than a
+  new implementation file. `yo_test.go` declares
   `package yo_test` and tests through the exported API; only use
   `package yo` when a test truly can't work without private access, which is
   almost never.
