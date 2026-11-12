@@ -200,6 +200,7 @@ func main() {
 	ui.HandleFunc("POST /api/vms", s.startVM)
 	ui.HandleFunc("POST /api/vms/{name}/prompt", s.promptVM)
 	ui.HandleFunc("POST /api/vms/{name}/setup", s.setupVM)
+	ui.HandleFunc("POST /api/vms/{name}/restart", s.restartVM)
 	ui.HandleFunc("POST /api/vms/{name}/backup", s.backupVM)
 	ui.HandleFunc("POST /api/vms/{name}/rm", s.rmVM)
 	ui.HandleFunc("POST /api/vms/{name}/adopt", s.adoptVM)
@@ -508,6 +509,18 @@ func (s *server) setupVM(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	s.queue(w, "setup", name, "", false, [][]string{{"setup"}, {"start"}})
+}
+
+// restartVM sets the VM up again and starts claude afresh, so it picks up
+// changed notes or a switch between classic and dispatcher.
+func (s *server) restartVM(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Prompt string }
+	json.NewDecoder(r.Body).Decode(&req)
+	restart := []string{"restart"}
+	if req.Prompt != "" {
+		restart = append(restart, req.Prompt)
+	}
+	s.queue(w, "restart", r.PathValue("name"), req.Prompt, false, [][]string{{"setup"}, restart})
 }
 
 func (s *server) backupVM(w http.ResponseWriter, r *http.Request) {

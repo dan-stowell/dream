@@ -166,6 +166,7 @@ async function loadVMs() {
           <span class="actions">
             ${m ? `<button data-act="prompt">Prompt</button>
               <button data-act="setup" title="Refresh notes, agents and settings, and start claude if it isn't running">Set up again</button>
+              <button data-act="restart" title="Set up again, then end claude's session and start a new one (with the prompt below, if you've typed one)">Restart claude</button>
               <button data-act="switch">Make ${m.kind === "dispatcher" ? "classic" : "dispatcher"}</button>
               <button data-act="backup">Back up</button>` : ""}
             ${!m && !isSelf ? `<button data-act="adopt">Adopt</button>` : ""}
@@ -201,7 +202,7 @@ function markBusy() {
   });
 }
 
-const kindLabel = {start: "Start", prompt: "Prompt", rm: "Delete", setup: "Set up", backup: "Back up"};
+const kindLabel = {start: "Start", prompt: "Prompt", rm: "Delete", setup: "Set up", backup: "Back up", restart: "Restart"};
 function ago(t) {
   const s = Math.round((Date.now() - new Date(t)) / 1000);
   return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s/60)}m ago` : s < 172800 ? `${Math.round(s/3600)}h ago` : `${Math.round(s/86400)}d ago`;
@@ -289,9 +290,15 @@ $("#vms").addEventListener("click", async e => {
       loadJobs();
     } else if (btn.dataset.act === "setup" || btn.dataset.act === "switch") {
       const kind = btn.dataset.act === "switch" ? (row.dataset.kind === "dispatcher" ? "classic" : "dispatcher") : row.dataset.kind;
-      if (btn.dataset.act === "switch" && !confirm(`Make ${name} a ${kind} VM? This sets it up again; a running claude keeps its old instructions until you restart it.`)) return;
+      if (btn.dataset.act === "switch" && !confirm(`Make ${name} a ${kind} VM? This sets it up again; a running claude keeps its old instructions until you click Restart claude.`)) return;
       await api("POST", `/api/vms/${encodeURIComponent(name)}/setup`, {kind});
       loadJobs(); loadVMs();
+    } else if (btn.dataset.act === "restart") {
+      const ta = $(".prompt-box textarea", row), prompt = ta.value.trim();
+      if (!confirm(`End claude's session on ${name} and start a new one${prompt ? " with your prompt" : ""}? The old conversation stays in its transcript.`)) return;
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/restart`, {prompt});
+      ta.value = ""; openPrompts.delete(name); $(".prompt-box", row).classList.remove("open");
+      loadJobs();
     } else if (btn.dataset.act === "backup") {
       await api("POST", `/api/vms/${encodeURIComponent(name)}/backup`, {});
       loadJobs();

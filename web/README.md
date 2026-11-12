@@ -59,9 +59,10 @@ gets hourly backups, and prompts and delete work from the web UI.
 - The notes, agents and coordinator and dispatcher prompts come from the
   repo on each setup, so edit them here.
 - A dispatcher has `~/.config/vm/dispatcher.md`, named for its VM, and
-  starts with "Good morning!…" if no prompt is given. **Make classic** /
-  **Make dispatcher** switches a VM. A running claude keeps its old system
-  prompt until it's restarted.
+  starts with "Good morning!…" if no prompt is given. It tracks focus and
+  threads in `~/threads.md` on the VM. **Make classic** / **Make
+  dispatcher** switches a VM. **Restart claude** sets the VM up again and
+  starts a new session, so changes to these notes take effect.
 - The first start on a VM shows a claude.ai sign-in link. Paste the code
   back into the Activity panel.
 - `vm-child` updates itself on each VM when it changes here.

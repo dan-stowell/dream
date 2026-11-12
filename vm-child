@@ -13,6 +13,8 @@
 #   vm-child start [PROMPT]  start claude in tmux, or paste PROMPT into it.
 #                          Without a claude.ai login, starts one in tmux,
 #                          prints "vm: sign in at URL" and exits 3.
+#   vm-child restart [PROMPT]  end claude's session and start a new one, which
+#                          picks up the current notes and dispatcher prompt.
 #   vm-child login CODE    finish that login.
 #   vm-child backup        send transcripts changed since the last backup to CTL.
 set -euo pipefail
@@ -328,6 +330,14 @@ cmd_start() {
   fi
 }
 
+cmd_restart() {
+  if tmux has-session -t claude 2>/dev/null; then
+    tmux kill-session -t claude
+    echo "Ended the old claude session."
+  fi
+  cmd_start "$@"
+}
+
 cmd_login() {
   local code=${1:?usage: vm-child login CODE}
   tmux send-keys -t vm-login -l "$code"
@@ -394,7 +404,7 @@ send_batch() {
 cmd=${1:-}
 (($#)) && shift
 case $cmd in
-  install | agent | setup | start | login | backup) "cmd_$cmd" "$@" ;;
+  install | agent | setup | start | restart | login | backup) "cmd_$cmd" "$@" ;;
   *)
     sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
     exit 2
