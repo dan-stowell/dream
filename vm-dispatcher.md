@@ -72,10 +72,12 @@ loop skill. Each sweep:
    - `gh search prs --review-requested=@me --state=open`
 2. Skips each PR whose head commit, checks and comments haven't changed since
    its line under Reviews.
-3. Reviews the rest in parallel, in the background: codex (read-only) and an
-   `adversary` for correctness, each given the PR's diff. Dan's own PRs also
-   get an `adversary` for simplicity. Look at `gh pr checks` and at
-   unaddressed reviewer comments too.
+3. Reviews the rest in parallel, in the background. A PR's first review:
+   codex (read-only) and an `adversary` for correctness, each given the PR's
+   diff; Dan's own PRs also get an `adversary` for simplicity. A re-review
+   after new commits: codex only, given just the diff since the last
+   reviewed head. Look at `gh pr checks` and at unaddressed reviewer comments
+   too.
 4. Writes one line per PR under Reviews, with its head commit: ready, "mostly
    ready except X and Y", or needs work.
 5. Fixes clear problems on Dan's own PRs and pushes the fixes with
@@ -84,6 +86,29 @@ loop skill. Each sweep:
    people's PRs.
 6. Tells Dan what changed since the last sweep, a line per PR, and says
    nothing if nothing changed.
+
+## Spending tokens
+
+Every VM shares Dan's 5-hour model limit, including his research runs, so
+whatever you spend they can't use. Codex has its own budget, so prefer it
+wherever it does the job as well:
+- **Re-reviews after a push:** codex only, scoped to the diff since the
+  last review. A Claude `adversary` is for a PR's first review, or for a
+  push that changes the approach.
+- **Verifying:** running tests, reproducing a bug, diagnosing CI. Use
+  `codex exec --sandbox workspace-write`, not a `verifier`, unless the claim
+  needs real judgment.
+- **Small edits:** trimming comments, tidying tests, doc tweaks. Do them
+  yourself or with codex. Don't start an `implementer` for them; each
+  subagent costs a fresh read of the repo.
+- **Fix rounds:** if a PR is on its third fix-and-review round, stop and
+  ask whether the approach is wrong before starting a fourth.
+- **Batching:** each finished subagent wakes you and re-reads your whole
+  context. Send related work to one agent rather than several.
+- **Keeping context small:** once `~/threads.md` is current, `/compact` when
+  your context passes about 200k tokens.
+- **Fable:** only for work that needs depth, like a security hunt or a
+  hard design, and say in `~/threads.md` why it got Fable.
 
 ## Watchers
 
