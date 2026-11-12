@@ -18,13 +18,11 @@ package main
 
 import (
 	"archive/tar"
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"embed"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -243,9 +241,6 @@ func (s *server) exe(ctx context.Context, args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Exit codes come as a trailer by default, which a proxy may drop; this
-	// format puts them in the body.
-	req.Header.Set("Accept", "application/x-ndjson")
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -255,39 +250,30 @@ func (s *server) exe(ctx context.Context, args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var stdout, stderr bytes.Buffer
-	exit, parsed := -1, false
-	sc := bufio.NewScanner(bytes.NewReader(body))
-	sc.Buffer(nil, 16<<20)
-	for sc.Scan() {
-		var line struct {
-			Stdout, Stderr, Error string
-			ExitCode          *int `json:"exit_code"`
+	// exe.dev answers with the command's JSON output, and reports failure as
+	// a JSON object with an "error" field, sometimes followed by more output
+	// and often with status 200. The exit code, when there is one, is a
+	// trailer.
+	fail := func(msg string) error { return fmt.Errorf("exe.dev %s: %s", args[0], msg) }
+	if resp.StatusCode/100 != 2 {
+		return nil, fail(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(body)))
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	for {
+		var v struct {
+			Error string `json:"error"`
 		}
-		if json.Unmarshal(sc.Bytes(), &line) != nil {
-			parsed = false
+		if err := dec.Decode(&v); err != nil {
 			break
 		}
-		parsed = true
-		o, _ := base64.StdEncoding.DecodeString(line.Stdout)
-		e, _ := base64.StdEncoding.DecodeString(line.Stderr)
-		stdout.Write(o)
-		stderr.Write(e)
-		if line.Error != "" {
-			stderr.WriteString(line.Error)
-		}
-		if line.ExitCode != nil {
-			exit = *line.ExitCode
+		if v.Error != "" {
+			return nil, fail(v.Error)
 		}
 	}
-	if !parsed {
-		return nil, fmt.Errorf("exe.dev %s: HTTP %d: %s", args[0], resp.StatusCode, bytes.TrimSpace(body))
+	if x := resp.Trailer.Get("X-Exe-Exit"); x != "" && x != "0" {
+		return nil, fail(fmt.Sprintf("exit %s: %s", x, bytes.TrimSpace(body)))
 	}
-	if exit != 0 {
-		msg := bytes.TrimSpace(append(stderr.Bytes(), stdout.Bytes()...))
-		return nil, fmt.Errorf("exe.dev %s: exit %d: %s", args[0], exit, msg)
-	}
-	return stdout.Bytes(), nil
+	return body, nil
 }
 
 func (s *server) exeVMs(ctx context.Context) ([]map[string]any, error) {
