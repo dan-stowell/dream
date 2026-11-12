@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# vm [--repo OWNER/REPO] NAME [PROMPT]: create an exe.dev VM (or reuse an
+# vm [--repo OWNER/REPO] [--dispatcher] NAME [PROMPT]: create an exe.dev VM (or reuse an
 # existing one) and attach
 # to a tmux session running a logged-in claude (with Remote Control) in $HOME.
 # The VM gets the bb CLI (also as bazel and bazelisk), BUILDBUDDY_API_KEY,
@@ -15,6 +15,11 @@
 # the integration's name, so later runs of plain vm NAME keep it in that mode.
 # Set up the integration once with
 #   ssh exe.dev int add github --name OWNER-REPO --repository OWNER/REPO --attach auto:all
+#
+# With --dispatcher, the main claude also acts as Dan's home base for the day
+# (vm-dispatcher.md): it keeps a tracking issue, suggests where to focus, and
+# reviews open PRs in the background. The VM keeps that mode, so later runs
+# of plain vm NAME stay in it.
 #
 # vm ls lists your VMs. vm backup [NAME...] runs vm-backup now, rather than
 # waiting for its hourly run. vm rm NAME... backs up each VM's transcripts with
@@ -99,14 +104,27 @@ case ${1:-} in
     ;;
 esac
 
-repo=
-if [[ ${1:-} == --repo ]]; then
-  repo=${2:-}
-  shift
-  (( $# == 0 )) || shift
-fi
+usage="usage: vm [--repo OWNER/REPO] [--dispatcher] NAME [PROMPT] | vm ls | vm backup [NAME...] | vm rm NAME... | vm login NAME CODE"
+repo= dispatcher=
+while [[ ${1:-} == --* ]]; do
+  case $1 in
+    --repo)
+      repo=${2:-}
+      shift
+      (( $# == 0 )) || shift
+      ;;
+    --dispatcher)
+      dispatcher=1
+      shift
+      ;;
+    *)
+      echo "$usage" >&2
+      exit 2
+      ;;
+  esac
+done
 if [[ $# -lt 1 || $# -gt 2 || ( -n $repo && $repo != */* ) ]]; then
-  echo "usage: vm [--repo OWNER/REPO] NAME [PROMPT] | vm ls | vm backup [NAME...] | vm rm NAME... | vm login NAME CODE" >&2
+  echo "$usage" >&2
   exit 2
 fi
 name=$1
@@ -314,12 +332,22 @@ ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude ~/.config/shelley &&
 # The main claude coordinates the subagents in vm-agents rather than doing the
 # work itself. Its instructions are appended to its system prompt, not put in
 # CLAUDE.md, so the subagents don't read them too.
-COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$here" -cf - vm-agents vm-coordinator.md vm-coordinator-shelley.md |
-  ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude/agents ~/.config/vm &&
-    tmp=$(mktemp -d) && tar -C "$tmp" -xf - &&
-    cp "$tmp"/vm-agents/*.md ~/.claude/agents/ &&
-    cp "$tmp"/vm-coordinator.md ~/.config/vm/coordinator.md &&
-    cp "$tmp"/vm-coordinator-shelley.md ~/.config/vm/coordinator-shelley.md && rm -rf "$tmp"'
+# A dispatcher VM also gets vm-dispatcher.md, named for the VM. Having that
+# file is what makes a VM a dispatcher, so it's refreshed on every run once
+# there, with or without --dispatcher.
+COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$here" -cf - vm-agents vm-coordinator.md vm-coordinator-shelley.md vm-dispatcher.md |
+  ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q '
+    set -euo pipefail
+    mkdir -p ~/.claude/agents ~/.config/vm
+    tmp=$(mktemp -d) && tar -C "$tmp" -xf -
+    cp "$tmp"/vm-agents/*.md ~/.claude/agents/
+    cp "$tmp"/vm-coordinator.md ~/.config/vm/coordinator.md
+    cp "$tmp"/vm-coordinator-shelley.md ~/.config/vm/coordinator-shelley.md
+    if [ -n "$2" ] || [ -e ~/.config/vm/dispatcher.md ]; then
+      sed "s|VMNAME|$1|g" "$tmp"/vm-dispatcher.md >~/.config/vm/dispatcher.md
+    fi
+    rm -rf "$tmp"
+  ') _ $(printf '%q ' "$name" "$dispatcher")"
 
 # Shelley coordinates too, when claude isn't available. Its system-prompt hook
 # runs for subagents as well, so it adds the coordinator notes, plus how the
@@ -417,7 +445,13 @@ if ! tmux has-session -t claude 2>/dev/null; then
 
   tmux new-session -d -s claude -c "$HOME"
   cmd="claude --dangerously-skip-permissions --remote-control $name"
-  cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md)"'
+  if [ -e ~/.config/vm/dispatcher.md ]; then
+    cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/dispatcher.md)"'
+    # A dispatcher gets started on its day even without a prompt.
+    [ -n "$prompt" ] || prompt='Good morning! Set up for today, then tell me where you think I should focus.'
+  else
+    cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md)"'
+  fi
   [ -z "$prompt" ] || cmd+=" $(printf %q "$prompt")"
   tmux send-keys -t claude "$cmd" Enter
 elif [ -n "$prompt" ]; then
