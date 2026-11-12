@@ -225,9 +225,12 @@ func (s *server) agentAuth(next http.Handler) http.Handler {
 		ok := s.vms[vm] != nil
 		s.mu.Unlock()
 		if !ok {
-			if vm != "" {
-				log.Printf("agent request from unmanaged VM %q: %s %s", vm, r.Method, r.URL.Path)
+			var hs []string
+			for k := range r.Header {
+				hs = append(hs, k)
 			}
+			sort.Strings(hs)
+			log.Printf("refused agent request from VM %q: %s %s (headers: %s)", vm, r.Method, r.URL.Path, strings.Join(hs, " "))
 			http.Error(w, "not a VM this app manages", http.StatusForbidden)
 			return
 		}

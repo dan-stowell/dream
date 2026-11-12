@@ -137,8 +137,9 @@ report() {
 cmd_setup() {
   local tmp
   tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' RETURN
-  (umask 077 && ctl_curl "$ctl/agent/bundle" | tar -xz -C "$tmp")
+  # EXIT, not RETURN: bash runs RETURN traps when a sourced file finishes too.
+  trap 'rm -rf "$tmp"' EXIT
+  (umask 077 && ctl_curl "$ctl/agent/bundle" | tar -xzm -C "$tmp")
   # config sets name, dispatcher, git_name, git_email, shelley_model and
   # claude_email; secrets sets gh_token and bb_api_key.
   . "$tmp/config"
