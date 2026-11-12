@@ -85,9 +85,12 @@ cmd_agent() {
     # Update only between jobs: vm-web counts a job as lost once its agent
     # polls again without reporting on it.
     latest=$(jq -r '.version // empty' <<<"$resp")
-    if [ -n "$latest" ] && [ "$latest" != "$version" ] && update_self "$latest"; then
-      echo "vm-agent updated to $latest"
-      exec "$self" agent
+    if [ -n "$latest" ] && [ "$latest" != "$version" ]; then
+      if update_self "$latest"; then
+        echo "vm-agent updated to $latest"
+        exec "$self" agent
+      fi
+      sleep 5
     fi
   done
 }

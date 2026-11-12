@@ -885,6 +885,17 @@ func (s *server) scriptVersion() string {
 // agentPoll hands the agent its VM's next job, waiting up to 50s for one.
 func (s *server) agentPoll(w http.ResponseWriter, r *http.Request) {
 	vm := r.Header.Get("X-Exedev-Source-Vm")
+	var req struct{ Version string }
+	json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req)
+	// An agent running an old vm-child updates before it gets a job, so the
+	// job runs with the current script.
+	if v := s.scriptVersion(); req.Version != "" && req.Version != v {
+		s.mu.Lock()
+		s.lastPoll[vm] = time.Now()
+		s.mu.Unlock()
+		writeJSON(w, map[string]any{"version": v})
+		return
+	}
 	deadline := time.After(50 * time.Second)
 	// An agent runs one job at a time, so a job it took and never finished
 	// is lost, say to a restart of the VM.
