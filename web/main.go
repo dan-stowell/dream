@@ -3,7 +3,7 @@
 // script does, from a VM rather than a laptop, and with as little access as it
 // can get by with:
 //
-//   - It reaches exe.dev through an HTTP-proxy integration (-spawn-api) that
+//   - It reaches exe.dev through an HTTP-proxy integration (-exe-api) that
 //     injects a token allowed only ls, new and rm. The token never touches
 //     this VM.
 //   - It has no SSH access to the VMs it makes. Each one runs vm-child as a
@@ -33,12 +33,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -48,7 +50,7 @@ var static embed.FS
 var (
 	addr      = flag.String("addr", ":8000", "address for the UI, behind exe.dev's proxy")
 	agentAddr = flag.String("agent-addr", ":8001", "address for the VMs' agents, behind the peer integration")
-	exeAPI    = flag.String("spawn-api", "https://spawn-api.int.exe.xyz", "HTTP-proxy integration in front of https://exe.dev")
+	exeAPI    = flag.String("exe-api", "https://spawn-api.int.exe.xyz", "HTTP-proxy integration in front of https://exe.dev")
 	ctlURL    = flag.String("ctl-url", "https://spawn.int.exe.xyz", "peer integration the VMs reach this app's -agent-addr through")
 	tag       = flag.String("tag", "spawn", "tag for new VMs; the peer integration is attached to it")
 	repoDir   = flag.String("repo", "", "the dream checkout with vm-child and the notes (default: .. from the working directory)")
@@ -101,12 +103,32 @@ type job struct {
 	steps    [][]string   // vm-child command lines for the agent
 	queued   time.Time
 	picked   time.Time
-	reported bool       // the agent said it's done with the steps
-	then     func(*job) // runs after the agent finishes the steps
+	reported bool // the agent said it's done with the steps
+}
+
+// storedJob is a job as jobs.json keeps it, so a restart of this app
+// doesn't lose queued work, prompts or logs.
+type storedJob struct {
+	ID       int64      `json:"id"`
+	Kind     string     `json:"kind"`
+	VM       string     `json:"vm"`
+	State    string     `json:"state"`
+	Auto     bool       `json:"auto,omitempty"`
+	LoginURL string     `json:"login_url,omitempty"`
+	Started  time.Time  `json:"started"`
+	Ended    time.Time  `json:"ended,omitzero"`
+	Prompt   string     `json:"prompt,omitempty"`
+	CtlLog   string     `json:"ctl_log,omitempty"`
+	AgentLog string     `json:"agent_log,omitempty"`
+	Steps    [][]string `json:"steps,omitempty"`
+	Queued   time.Time  `json:"queued,omitzero"`
+	Picked   time.Time  `json:"picked,omitzero"`
+	Reported bool       `json:"reported,omitempty"`
 }
 
 type server struct {
 	repo, backups, state string
+	jobsFile             string
 	emails               map[string]bool
 	self                 string
 	client               *http.Client
@@ -155,6 +177,20 @@ func main() {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		log.Fatal(err)
 	}
+
+	s.jobsFile = filepath.Join(filepath.Dir(s.state), "jobs.json")
+	if err := s.loadJobs(); err != nil {
+		log.Fatalf("%s: %v", s.jobsFile, err)
+	}
+	go s.saveJobsEvery(2 * time.Second)
+	go func() {
+		// Save on the way out, so a restart loses nothing.
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM, os.Interrupt)
+		<-ch
+		s.saveJobs()
+		os.Exit(0)
+	}()
 
 	ui := http.NewServeMux()
 	ui.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
@@ -372,7 +408,7 @@ func (s *server) startVM(w http.ResponseWriter, r *http.Request) {
 			s.saveLocked()
 			s.mu.Unlock()
 		}
-		s.queue(w, "start", req.Name, req.Prompt, false, [][]string{{"setup"}, startStep(req.Prompt)}, nil)
+		s.queue(w, "start", req.Name, req.Prompt, false, [][]string{{"setup"}, startStep(req.Prompt)})
 		return
 	}
 	j, err := s.newJob("start", req.Name, req.Prompt, false)
@@ -455,7 +491,7 @@ func (s *server) promptVM(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "a prompt is required")
 		return
 	}
-	s.queue(w, "prompt", r.PathValue("name"), req.Prompt, false, [][]string{startStep(req.Prompt)}, nil)
+	s.queue(w, "prompt", r.PathValue("name"), req.Prompt, false, [][]string{startStep(req.Prompt)})
 }
 
 // setupVM reruns setup, like vm NAME: refreshes notes, agents and settings,
@@ -471,11 +507,11 @@ func (s *server) setupVM(w http.ResponseWriter, r *http.Request) {
 		s.saveLocked()
 	}
 	s.mu.Unlock()
-	s.queue(w, "setup", name, "", false, [][]string{{"setup"}, {"start"}}, nil)
+	s.queue(w, "setup", name, "", false, [][]string{{"setup"}, {"start"}})
 }
 
 func (s *server) backupVM(w http.ResponseWriter, r *http.Request) {
-	s.queue(w, "backup", r.PathValue("name"), "", false, [][]string{{"backup"}}, nil)
+	s.queue(w, "backup", r.PathValue("name"), "", false, [][]string{{"backup"}})
 }
 
 // rmVM backs up the VM's transcripts one last time, then deletes it. A VM
@@ -486,22 +522,25 @@ func (s *server) rmVM(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "%s is running this app", name)
 		return
 	}
-	s.queue(w, "rm", name, "", false, [][]string{{"backup"}}, func(j *job) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		s.appendLog(j, "$ ssh exe.dev rm "+name+"\n")
-		if _, err := s.exe(ctx, "rm", name); err != nil {
-			s.fail(j, err)
-			return
-		}
-		s.mu.Lock()
-		delete(s.vms, name)
-		delete(s.lastPoll, name)
-		s.saveLocked()
-		s.mu.Unlock()
-		s.appendLog(j, "Deleted.\n")
-		s.finish(j, 0)
-	})
+	s.queue(w, "rm", name, "", false, [][]string{{"backup"}})
+}
+
+// deleteVM finishes an rm job once the agent's final backup succeeds.
+func (s *server) deleteVM(j *job) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	s.appendLog(j, "$ ssh exe.dev rm "+j.VM+"\n")
+	if _, err := s.exe(ctx, "rm", j.VM); err != nil {
+		s.fail(j, err)
+		return
+	}
+	s.mu.Lock()
+	delete(s.vms, j.VM)
+	delete(s.lastPoll, j.VM)
+	s.saveLocked()
+	s.mu.Unlock()
+	s.appendLog(j, "Deleted.\n")
+	s.finish(j, 0)
 }
 
 // adoptVM takes on a VM this app didn't make, such as one from the vm
@@ -615,7 +654,7 @@ func (s *server) newJobLocked(kind, vm, prompt string, auto bool) (*job, error) 
 }
 
 // queue hands steps to vm's agent as a new job, and responds with its id.
-func (s *server) queue(w http.ResponseWriter, kind, vm, prompt string, auto bool, steps [][]string, then func(*job)) {
+func (s *server) queue(w http.ResponseWriter, kind, vm, prompt string, auto bool, steps [][]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.vms[vm] == nil {
@@ -627,7 +666,7 @@ func (s *server) queue(w http.ResponseWriter, kind, vm, prompt string, auto bool
 		httpError(w, http.StatusConflict, "%v", err)
 		return
 	}
-	j.steps, j.then, j.State, j.queued = steps, then, "queued", time.Now()
+	j.steps, j.State, j.queued = steps, "queued", time.Now()
 	s.wakeLocked()
 	writeJSON(w, map[string]any{"id": j.ID})
 }
@@ -963,18 +1002,18 @@ func (s *server) agentReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j.agentLog = req.Log
-	var then func(*job)
+	del := false
 	if req.Done {
 		j.reported = true
-		if req.Exit == 0 && j.then != nil {
-			then = j.then
+		if req.Exit == 0 && j.Kind == "rm" {
+			del = true
 		} else {
 			s.finishLocked(j, req.Exit)
 		}
 	}
 	s.mu.Unlock()
-	if then != nil {
-		go then(j)
+	if del {
+		go s.deleteVM(j)
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -1069,4 +1108,77 @@ func httpError(w http.ResponseWriter, code int, format string, args ...any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf(format, args...)})
+}
+
+func (s *server) loadJobs() error {
+	b, err := os.ReadFile(s.jobsFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	var stored []storedJob
+	if err := json.Unmarshal(b, &stored); err != nil {
+		return err
+	}
+	for _, sj := range stored {
+		j := &job{ID: sj.ID, Kind: sj.Kind, VM: sj.VM, State: sj.State, Auto: sj.Auto, LoginURL: sj.LoginURL,
+			Started: sj.Started, Ended: sj.Ended, Prompt: sj.Prompt, agentLog: sj.AgentLog, steps: sj.Steps,
+			queued: sj.Queued, picked: sj.Picked, reported: sj.Reported}
+		j.ctlLog.WriteString(sj.CtlLog)
+		if j.State == "running" {
+			switch {
+			case j.steps == nil && j.Kind == "start":
+				// Stopped while creating the VM, which is already recorded:
+				// hand its agent the setup anyway, and let the pickup timeout
+				// catch a VM that never got made.
+				j.steps = [][]string{{"setup"}, startStep(j.Prompt)}
+				j.State, j.queued = "queued", time.Now()
+				j.ctlLog.WriteString("vm-web restarted; waiting for the VM's agent.\n")
+			case j.reported && j.Kind == "rm":
+				j.State, j.Ended = "failed", time.Now()
+				fmt.Fprintf(&j.ctlLog, "%s\nvm-web restarted before deleting %s; its backup is done, so delete it again.\n", j.agentLog, j.VM)
+				j.agentLog = ""
+			}
+			// Otherwise the agent may still be working on it, and reports
+			// to the same ID.
+		}
+		s.jobs = append(s.jobs, j)
+		s.nextID = max(s.nextID, j.ID)
+	}
+	return nil
+}
+
+func (s *server) saveJobsEvery(d time.Duration) {
+	for range time.Tick(d) {
+		s.saveJobs()
+	}
+}
+
+var lastSavedJobs []byte
+
+func (s *server) saveJobs() {
+	s.mu.Lock()
+	stored := make([]storedJob, len(s.jobs))
+	for i, j := range s.jobs {
+		stored[i] = storedJob{ID: j.ID, Kind: j.Kind, VM: j.VM, State: j.State, Auto: j.Auto, LoginURL: j.LoginURL,
+			Started: j.Started, Ended: j.Ended, Prompt: j.Prompt, CtlLog: j.ctlLog.String(), AgentLog: j.agentLog,
+			Steps: j.steps, Queued: j.queued, Picked: j.picked, Reported: j.reported}
+	}
+	b, err := json.Marshal(stored)
+	if err != nil || bytes.Equal(b, lastSavedJobs) {
+		s.mu.Unlock()
+		return
+	}
+	lastSavedJobs = b
+	s.mu.Unlock()
+	// Steps can hold a login code, so only this user can read the file.
+	tmp := s.jobsFile + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		log.Printf("save jobs: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, s.jobsFile); err != nil {
+		log.Printf("save jobs: %v", err)
+	}
 }
