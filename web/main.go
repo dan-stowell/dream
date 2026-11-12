@@ -3,7 +3,7 @@
 // script does, from a VM rather than a laptop, and with as little access as it
 // can get by with:
 //
-//   - It reaches exe.dev through an HTTP-proxy integration (-exe-api) that
+//   - It reaches exe.dev through an HTTP-proxy integration (-spawn-api) that
 //     injects a token allowed only ls, new and rm. The token never touches
 //     this VM.
 //   - It has no SSH access to the VMs it makes. Each one runs vm-child as a
@@ -50,7 +50,7 @@ var static embed.FS
 var (
 	addr      = flag.String("addr", ":8000", "address for the UI, behind exe.dev's proxy")
 	agentAddr = flag.String("agent-addr", ":8001", "address for the VMs' agents, behind the peer integration")
-	exeAPI    = flag.String("exe-api", "https://exe-api.int.exe.xyz", "HTTP-proxy integration in front of https://exe.dev")
+	exeAPI    = flag.String("spawn-api", "https://spawn-api.int.exe.xyz", "HTTP-proxy integration in front of https://exe.dev")
 	ctlURL    = flag.String("ctl-url", "https://spawn.int.exe.xyz", "peer integration the VMs reach this app's -agent-addr through")
 	tag       = flag.String("tag", "spawn", "tag for new VMs; the peer integration is attached to it")
 	repoDir   = flag.String("repo", "", "the dream checkout with vm-child and the notes (default: .. from the working directory)")

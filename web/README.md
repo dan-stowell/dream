@@ -27,7 +27,7 @@ From your laptop:
 #    Anyone using it can delete any of your VMs, so it's stored in an
 #    integration rather than on spawn.
 ssh exe.dev ssh-key generate-api-key --label=spawn --cmds=ls,new,rm --exp=365d
-printf '%s' 'exe1.…' | ssh exe.dev integrations add http-proxy --name exe-api \
+printf '%s' 'exe1.…' | ssh exe.dev integrations add http-proxy --name spawn-api \
   --target https://exe.dev --bearer=- --attach vm:spawn
 
 # 2. Let VMs tagged spawn reach the agent port.
