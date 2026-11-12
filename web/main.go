@@ -1,23 +1,41 @@
-// vm-web is a web front end to the vm script: it lists exe.dev VMs, starts
-// them (vm NAME [PROMPT]), sends prompts to them, and deletes them after a
-// transcript backup (vm rm NAME). Long-running vm commands run as background
-// jobs whose output the page polls.
+// vm-web creates exe.dev VMs that run claude with Remote Control, sends them
+// prompts, backs up their transcripts and deletes them. It does what the vm
+// script does, from a VM rather than a laptop, and with as little access as it
+// can get by with:
 //
-// It trusts the X-ExeDev-Email header set by exe.dev's HTTPS proxy, so serve
-// it only through that proxy, with the VM's sharing kept private.
+//   - It reaches exe.dev through an HTTP-proxy integration (-exe-api) that
+//     injects a token allowed only ls, new and rm. The token never touches
+//     this VM.
+//   - It has no SSH access to the VMs it makes. Each one runs vm-child as a
+//     service that polls this app for jobs through a peer integration
+//     (-ctl-url). exe.dev stamps those requests with the calling VM's name in
+//     X-Exedev-Source-Vm, which can't be forged, and they arrive on their own
+//     port (-agent-addr).
+//
+// The UI port trusts the X-ExeDev-Email header set by exe.dev's HTTPS proxy,
+// so serve it only through that proxy, with the VM's sharing kept private.
 package main
 
 import (
+	"archive/tar"
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -30,54 +48,101 @@ import (
 var static embed.FS
 
 var (
-	addr    = flag.String("addr", ":8000", "address to listen on")
-	vmPath  = flag.String("vm", "", "path to the vm script (default: ../vm next to this binary's source)")
-	allowed = flag.String("allow", "dan@buildbuddy.io,dstowell@gmail.com", "comma-separated emails allowed to use the app")
+	addr      = flag.String("addr", ":8000", "address for the UI, behind exe.dev's proxy")
+	agentAddr = flag.String("agent-addr", ":8001", "address for the VMs' agents, behind the peer integration")
+	exeAPI    = flag.String("exe-api", "https://exe-api.int.exe.xyz", "HTTP-proxy integration in front of https://exe.dev")
+	ctlURL    = flag.String("ctl-url", "https://spawn.int.exe.xyz", "peer integration the VMs reach this app's -agent-addr through")
+	tag       = flag.String("tag", "spawn", "tag for new VMs; the peer integration is attached to it")
+	repoDir   = flag.String("repo", "", "the dream checkout with vm-child and the notes (default: .. from the working directory)")
+	backupDir = flag.String("backups", "", "where transcripts go (default ~/vm-transcripts)")
+	stateFile = flag.String("state", "", "the list of VMs this app manages (default ~/.config/vm/state.json)")
+	allowed   = flag.String("allow", "dan@buildbuddy.io,dstowell@gmail.com", "comma-separated emails allowed to use the app")
 )
 
-// vm's naming rule, as checked by the script itself.
+// exe.dev's naming rule, as the vm script checks it.
 var nameRE = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`)
 
 var loginURLRE = regexp.MustCompile(`(?m)^vm: sign in at (\S+)$`)
 
-const maxLog = 256 << 10
+const (
+	maxLog         = 256 << 10
+	pickupTimeout  = 15 * time.Minute // for a job to reach its VM's agent
+	runTimeout     = 45 * time.Minute // for an agent to finish a job
+	agentFresh     = 2 * time.Minute  // an agent polled within this is online
+	backupInterval = time.Hour
+)
+
+// The files vm-child setup needs, besides the generated config and secrets.
+var bundleFiles = []string{
+	"vm-CLAUDE.md", "vm-CLAUDE-buildbuddy.md", "vm-coordinator.md",
+	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-agents/*.md",
+}
+
+// managed is a VM this app made or adopted. Only these get jobs, secrets and
+// backups.
+type managed struct {
+	Kind       string    `json:"kind"` // classic or dispatcher
+	Created    time.Time `json:"created"`
+	LastBackup time.Time `json:"last_backup,omitzero"`
+}
 
 type job struct {
-	ID       int       `json:"id"`
-	Kind     string    `json:"kind"` // start, prompt, rm
+	ID       int64     `json:"id"`
+	Kind     string    `json:"kind"` // start, prompt, setup, backup, rm
 	VM       string    `json:"vm"`
-	State    string    `json:"state"` // running, login, ok, failed
+	State    string    `json:"state"` // queued, running, login, ok, failed
+	Auto     bool      `json:"auto,omitempty"`
 	LoginURL string    `json:"login_url,omitempty"`
 	Started  time.Time `json:"started"`
 	Ended    time.Time `json:"ended,omitzero"`
 	Prompt   string    `json:"prompt,omitempty"` // so a login or retry can resume a start
 	Log      string    `json:"log"`
 
-	log bytes.Buffer
+	ctlLog   bytes.Buffer // this app's part of the log
+	agentLog string       // the agent's latest report
+	steps    [][]string   // vm-child command lines for the agent
+	queued   time.Time
+	picked   time.Time
+	reported bool       // the agent said it's done with the steps
+	then     func(*job) // runs after the agent finishes the steps
 }
 
 type server struct {
-	vm     string
-	self   string
-	emails map[string]bool
+	repo, backups, state string
+	emails               map[string]bool
+	self                 string
+	client               *http.Client
+	gh, bb               string
 
-	mu     sync.Mutex
-	jobs   []*job
-	nextID int
+	mu       sync.Mutex
+	vms      map[string]*managed
+	jobs     []*job
+	nextID   int64
+	lastPoll map[string]time.Time
+	wake     chan struct{} // closed and replaced whenever a job is queued
 }
 
 func main() {
 	flag.Parse()
-	s := &server{vm: *vmPath, emails: map[string]bool{}}
-	if s.vm == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			log.Fatal(err)
-		}
-		s.vm = filepath.Join(filepath.Dir(exe), "..", "vm")
+	home, _ := os.UserHomeDir()
+	s := &server{
+		repo: *repoDir, backups: *backupDir, state: *stateFile,
+		emails: map[string]bool{}, vms: map[string]*managed{}, lastPoll: map[string]time.Time{},
+		client: &http.Client{Timeout: 2 * time.Minute}, wake: make(chan struct{}),
+		gh: os.Getenv("VM_GITHUB_TOKEN"), bb: os.Getenv("VM_BUILDBUDDY_API_KEY"),
+		nextID: time.Now().Unix(), // so an agent reporting on a job from before a restart can't hit a new one
 	}
-	if _, err := os.Stat(s.vm); err != nil {
-		log.Fatalf("vm script: %v", err)
+	if s.repo == "" {
+		s.repo = ".."
+	}
+	if s.backups == "" {
+		s.backups = filepath.Join(home, "vm-transcripts")
+	}
+	if s.state == "" {
+		s.state = filepath.Join(home, ".config", "vm", "state.json")
+	}
+	if _, err := os.Stat(filepath.Join(s.repo, "vm-child")); err != nil {
+		log.Fatalf("-repo: %v", err)
 	}
 	s.self, _ = os.Hostname()
 	for _, e := range strings.Split(*allowed, ",") {
@@ -85,24 +150,56 @@ func main() {
 			s.emails[strings.ToLower(e)] = true
 		}
 	}
+	if b, err := os.ReadFile(s.state); err == nil {
+		if err := json.Unmarshal(b, &s.vms); err != nil {
+			log.Fatalf("%s: %v", s.state, err)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		log.Fatal(err)
+	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+	ui := http.NewServeMux()
+	ui.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, static, "index.html")
 	})
-	mux.HandleFunc("GET /api/vms", s.listVMs)
-	mux.HandleFunc("POST /api/vms", s.startVM)
-	mux.HandleFunc("POST /api/vms/{name}/prompt", s.promptVM)
-	mux.HandleFunc("POST /api/vms/{name}/rm", s.rmVM)
-	mux.HandleFunc("GET /api/jobs", s.listJobs)
-	mux.HandleFunc("POST /api/jobs/{id}/login", s.login)
-	log.Printf("vm-web on %s, running %s", *addr, s.vm)
-	log.Fatal(http.ListenAndServe(*addr, s.auth(mux)))
+	ui.HandleFunc("GET /api/vms", s.listVMs)
+	ui.HandleFunc("POST /api/vms", s.startVM)
+	ui.HandleFunc("POST /api/vms/{name}/prompt", s.promptVM)
+	ui.HandleFunc("POST /api/vms/{name}/setup", s.setupVM)
+	ui.HandleFunc("POST /api/vms/{name}/backup", s.backupVM)
+	ui.HandleFunc("POST /api/vms/{name}/rm", s.rmVM)
+	ui.HandleFunc("POST /api/vms/{name}/adopt", s.adoptVM)
+	ui.HandleFunc("POST /api/vms/{name}/forget", s.forgetVM)
+	ui.HandleFunc("GET /api/jobs", s.listJobs)
+	ui.HandleFunc("POST /api/jobs/{id}/login", s.login)
+	ui.HandleFunc("GET /api/backups", s.listBackups)
+	ui.HandleFunc("GET /api/backups/{name}", s.downloadBackup)
+
+	agent := http.NewServeMux()
+	agent.HandleFunc("GET /agent/vm-child", s.agentScript)
+	agent.HandleFunc("POST /agent/poll", s.agentPoll)
+	agent.HandleFunc("POST /agent/jobs/{id}", s.agentReport)
+	agent.HandleFunc("GET /agent/bundle", s.agentBundle)
+	agent.HandleFunc("POST /agent/backup", s.agentBackup)
+
+	go s.janitor()
+	go func() {
+		log.Printf("agents on %s", *agentAddr)
+		log.Fatal(http.ListenAndServe(*agentAddr, s.agentAuth(agent)))
+	}()
+	log.Printf("vm-web on %s; exe.dev via %s; VMs reach this app via %s", *addr, *exeAPI, *ctlURL)
+	log.Fatal(http.ListenAndServe(*addr, s.auth(ui)))
 }
 
-// auth admits only allowed exe.dev users, and refuses cross-site writes.
+// auth admits only allowed exe.dev users, and refuses cross-site writes. A
+// request from one of the VMs never gets in, even if exe.dev vouches for its
+// owner's email on it.
 func (s *server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Exedev-Source-Vm") != "" {
+			http.Error(w, "VMs use the agent port", http.StatusForbidden)
+			return
+		}
 		email := strings.ToLower(r.Header.Get("X-ExeDev-Email"))
 		if !s.emails[email] {
 			if email == "" {
@@ -122,42 +219,142 @@ func (s *server) auth(next http.Handler) http.Handler {
 	})
 }
 
-func (s *server) listVMs(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	// exe.dev occasionally drops a connection, so try twice.
+// agentAuth admits only managed VMs, as named by the peer integration.
+func (s *server) agentAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vm := r.Header.Get("X-Exedev-Source-Vm")
+		s.mu.Lock()
+		ok := s.vms[vm] != nil
+		s.mu.Unlock()
+		if !ok {
+			if vm != "" {
+				log.Printf("agent request from unmanaged VM %q: %s %s", vm, r.Method, r.URL.Path)
+			}
+			http.Error(w, "not a VM this app manages", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// exe runs an exe.dev command through the API integration.
+func (s *server) exe(ctx context.Context, args ...string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", *exeAPI+"/exec", strings.NewReader(shellQuote(args)))
+	if err != nil {
+		return nil, err
+	}
+	// Exit codes come as a trailer by default, which a proxy may drop; this
+	// format puts them in the body.
+	req.Header.Set("Accept", "application/x-ndjson")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var stdout, stderr bytes.Buffer
+	exit, parsed := -1, false
+	sc := bufio.NewScanner(bytes.NewReader(body))
+	sc.Buffer(nil, 16<<20)
+	for sc.Scan() {
+		var line struct {
+			Stdout, Stderr, Error string
+			ExitCode          *int `json:"exit_code"`
+		}
+		if json.Unmarshal(sc.Bytes(), &line) != nil {
+			parsed = false
+			break
+		}
+		parsed = true
+		o, _ := base64.StdEncoding.DecodeString(line.Stdout)
+		e, _ := base64.StdEncoding.DecodeString(line.Stderr)
+		stdout.Write(o)
+		stderr.Write(e)
+		if line.Error != "" {
+			stderr.WriteString(line.Error)
+		}
+		if line.ExitCode != nil {
+			exit = *line.ExitCode
+		}
+	}
+	if !parsed {
+		return nil, fmt.Errorf("exe.dev %s: HTTP %d: %s", args[0], resp.StatusCode, bytes.TrimSpace(body))
+	}
+	if exit != 0 {
+		msg := bytes.TrimSpace(append(stderr.Bytes(), stdout.Bytes()...))
+		return nil, fmt.Errorf("exe.dev %s: exit %d: %s", args[0], exit, msg)
+	}
+	return stdout.Bytes(), nil
+}
+
+func (s *server) exeVMs(ctx context.Context) ([]map[string]any, error) {
 	var out []byte
 	var err error
+	// exe.dev occasionally drops a connection, so try twice.
 	for range 2 {
-		if out, err = exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "exe.dev", "ls", "--json").Output(); err == nil {
+		if out, err = s.exe(ctx, "ls", "--json"); err == nil {
 			break
 		}
 	}
 	if err != nil {
-		// exe.dev explains some failures, like an unknown key, on stdout.
-		if msg := bytes.TrimSpace(out); len(msg) > 0 {
-			err = fmt.Errorf("%s", msg)
-		} else if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-			err = fmt.Errorf("%s", bytes.TrimSpace(ee.Stderr))
-		}
-		httpError(w, http.StatusBadGateway, "ssh exe.dev ls: %v", err)
-		return
+		return nil, err
 	}
 	var ls struct {
 		VMs []map[string]any `json:"vms"`
 	}
 	if err := json.Unmarshal(out, &ls); err != nil {
-		httpError(w, http.StatusBadGateway, "ssh exe.dev ls: %v", err)
+		return nil, fmt.Errorf("exe.dev ls: %v", err)
+	}
+	return ls.VMs, nil
+}
+
+func (s *server) saveLocked() error {
+	b, err := json.MarshalIndent(s.vms, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.state), 0o755); err != nil {
+		return err
+	}
+	tmp := s.state + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.state)
+}
+
+// --- UI ---
+
+func (s *server) listVMs(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
+	defer cancel()
+	vms, err := s.exeVMs(ctx)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, "%v", err)
 		return
 	}
-	sort.Slice(ls.VMs, func(i, j int) bool {
-		return fmt.Sprint(ls.VMs[i]["vm_name"]) < fmt.Sprint(ls.VMs[j]["vm_name"])
-	})
-	writeJSON(w, map[string]any{"vms": ls.VMs, "self": s.self})
+	sort.Slice(vms, func(i, j int) bool { return fmt.Sprint(vms[i]["vm_name"]) < fmt.Sprint(vms[j]["vm_name"]) })
+	s.mu.Lock()
+	for _, v := range vms {
+		name := fmt.Sprint(v["vm_name"])
+		if m := s.vms[name]; m != nil {
+			v["managed"] = m
+			if t, ok := s.lastPoll[name]; ok {
+				v["agent_seen"] = t
+			}
+		}
+	}
+	s.mu.Unlock()
+	writeJSON(w, map[string]any{"vms": vms, "self": s.self, "ctl_url": *ctlURL, "tag": *tag})
 }
 
 func (s *server) startVM(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Name, Prompt string }
+	var req struct {
+		Name, Prompt, Kind string
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "%v", err)
 		return
@@ -166,7 +363,101 @@ func (s *server) startVM(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "use 5-52 lowercase letters, digits and single hyphens, starting with a letter")
 		return
 	}
-	s.spawn(w, "start", req.Name, req.Prompt)
+	if req.Kind != "dispatcher" {
+		req.Kind = "classic"
+	}
+	if s.gh == "" || s.bb == "" {
+		httpError(w, http.StatusFailedDependency, "set VM_GITHUB_TOKEN and VM_BUILDBUDDY_API_KEY in ~/.config/vm/secrets and restart vm-web")
+		return
+	}
+	s.mu.Lock()
+	m := s.vms[req.Name]
+	s.mu.Unlock()
+	if m != nil {
+		// Like vm NAME on an existing VM: set it up again and start claude.
+		// Asking for a dispatcher turns a classic VM into one; the reverse
+		// takes an explicit choice in the UI, as with the vm script's marker.
+		if req.Kind == "dispatcher" && m.Kind != "dispatcher" {
+			s.mu.Lock()
+			m.Kind = "dispatcher"
+			s.saveLocked()
+			s.mu.Unlock()
+		}
+		s.queue(w, "start", req.Name, req.Prompt, false, [][]string{{"setup"}, startStep(req.Prompt)}, nil)
+		return
+	}
+	j, err := s.newJob("start", req.Name, req.Prompt, false)
+	if err != nil {
+		httpError(w, http.StatusConflict, "%v", err)
+		return
+	}
+	go s.create(j, req.Kind)
+	writeJSON(w, map[string]any{"id": j.ID})
+}
+
+// create makes the VM, whose first boot installs vm-child, which then polls
+// for the setup and start steps queued here.
+func (s *server) create(j *job, kind string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	vms, err := s.exeVMs(ctx)
+	if err != nil {
+		s.fail(j, err)
+		return
+	}
+	for _, v := range vms {
+		if v["vm_name"] == j.VM {
+			s.fail(j, fmt.Errorf("%s already exists, and this app didn't make it; adopt it from the list instead", j.VM))
+			return
+		}
+	}
+	// Record the VM first, so its agent is let in as soon as it boots.
+	s.mu.Lock()
+	s.vms[j.VM] = &managed{Kind: kind, Created: time.Now()}
+	err = s.saveLocked()
+	s.mu.Unlock()
+	if err != nil {
+		s.fail(j, err)
+		return
+	}
+	bootstrap := fmt.Sprintf("curl -fsS --retry 60 --retry-delay 5 --retry-all-errors -o /tmp/vm-child %s/agent/vm-child && bash /tmp/vm-child install %s", *ctlURL, *ctlURL)
+	args := []string{"new", "--name", j.VM, "--cpu", "8", "--memory", "32GB", "--disk", "100GB",
+		"--no-email", "--tag", *tag, "--setup-script", bootstrap, "--json"}
+	s.appendLog(j, fmt.Sprintf("Creating %s (%s)...\n$ ssh exe.dev %s\n", j.VM, kind, shellQuote(args[:len(args)-3])+" --setup-script … --json"))
+	out, err := s.exe(ctx, args...)
+	if err != nil {
+		// A timeout may still have made the VM; only forget it if it isn't there.
+		if vms, lerr := s.exeVMs(ctx); lerr == nil && !hasVM(vms, j.VM) {
+			s.mu.Lock()
+			delete(s.vms, j.VM)
+			s.saveLocked()
+			s.mu.Unlock()
+		}
+		s.fail(j, err)
+		return
+	}
+	s.appendLog(j, string(out)+"\nWaiting for the VM to boot and its agent to check in...\n")
+	s.mu.Lock()
+	j.steps = [][]string{{"setup"}, startStep(j.Prompt)}
+	j.State, j.queued = "queued", time.Now()
+	s.wakeLocked()
+	s.mu.Unlock()
+}
+
+func hasVM(vms []map[string]any, name string) bool {
+	for _, v := range vms {
+		if v["vm_name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func startStep(prompt string) []string {
+	if prompt == "" {
+		return []string{"start"}
+	}
+	return []string{"start", prompt}
 }
 
 func (s *server) promptVM(w http.ResponseWriter, r *http.Request) {
@@ -175,16 +466,92 @@ func (s *server) promptVM(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "a prompt is required")
 		return
 	}
-	s.spawn(w, "prompt", r.PathValue("name"), req.Prompt)
+	s.queue(w, "prompt", r.PathValue("name"), req.Prompt, false, [][]string{startStep(req.Prompt)}, nil)
 }
 
+// setupVM reruns setup, like vm NAME: refreshes notes, agents and settings,
+// and switches between classic and dispatcher if asked. A running claude
+// keeps its old system prompt until it's restarted.
+func (s *server) setupVM(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Kind string }
+	json.NewDecoder(r.Body).Decode(&req)
+	name := r.PathValue("name")
+	s.mu.Lock()
+	if m := s.vms[name]; m != nil && (req.Kind == "classic" || req.Kind == "dispatcher") && m.Kind != req.Kind {
+		m.Kind = req.Kind
+		s.saveLocked()
+	}
+	s.mu.Unlock()
+	s.queue(w, "setup", name, "", false, [][]string{{"setup"}, {"start"}}, nil)
+}
+
+func (s *server) backupVM(w http.ResponseWriter, r *http.Request) {
+	s.queue(w, "backup", r.PathValue("name"), "", false, [][]string{{"backup"}}, nil)
+}
+
+// rmVM backs up the VM's transcripts one last time, then deletes it. A VM
+// whose backup fails is kept.
 func (s *server) rmVM(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if name == s.self {
 		httpError(w, http.StatusBadRequest, "%s is running this app", name)
 		return
 	}
-	s.spawn(w, "rm", name, "")
+	s.queue(w, "rm", name, "", false, [][]string{{"backup"}}, func(j *job) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		s.appendLog(j, "$ ssh exe.dev rm "+name+"\n")
+		if _, err := s.exe(ctx, "rm", name); err != nil {
+			s.fail(j, err)
+			return
+		}
+		s.mu.Lock()
+		delete(s.vms, name)
+		delete(s.lastPoll, name)
+		s.saveLocked()
+		s.mu.Unlock()
+		s.appendLog(j, "Deleted.\n")
+		s.finish(j, 0)
+	})
+}
+
+// adoptVM takes on a VM this app didn't make, such as one from the vm
+// script. It gets an agent once someone with SSH access installs vm-child
+// on it (the UI shows how).
+func (s *server) adoptVM(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Kind string }
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.Kind != "dispatcher" {
+		req.Kind = "classic"
+	}
+	name := r.PathValue("name")
+	if name == s.self || !nameRE.MatchString(name) {
+		httpError(w, http.StatusBadRequest, "can't adopt %s", name)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.vms[name] == nil {
+		s.vms[name] = &managed{Kind: req.Kind, Created: time.Now()}
+		if err := s.saveLocked(); err != nil {
+			httpError(w, http.StatusInternalServerError, "%v", err)
+			return
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// forgetVM stops managing a VM without touching it.
+func (s *server) forgetVM(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.vms, r.PathValue("name"))
+	delete(s.lastPoll, r.PathValue("name"))
+	if err := s.saveLocked(); err != nil {
+		httpError(w, http.StatusInternalServerError, "%v", err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +561,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	var j *job
 	for _, jj := range s.jobs {
 		if fmt.Sprint(jj.ID) == r.PathValue("id") {
@@ -201,147 +569,483 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if j == nil || j.State != "login" {
-		s.mu.Unlock()
 		httpError(w, http.StatusConflict, "that job isn't waiting for a login")
 		return
 	}
 	// The same job carries on: type the code into the VM's waiting login,
 	// then rerun the start it interrupted.
-	j.State, j.LoginURL, j.Ended = "running", "", time.Time{}
-	s.mu.Unlock()
-	go func() {
-		err := s.run(j, "login", j.VM, strings.TrimSpace(req.Code))
-		if err == nil {
-			args := []string{j.VM}
-			if j.Prompt != "" {
-				args = append(args, j.Prompt)
-			}
-			err = s.run(j, args...)
-		}
-		s.finish(j, err)
-	}()
+	j.steps = [][]string{{"login", strings.TrimSpace(req.Code)}, startStep(j.Prompt)}
+	j.State, j.LoginURL, j.Ended, j.queued, j.picked, j.reported = "queued", "", time.Time{}, time.Now(), time.Time{}, false
+	j.ctlLog.WriteString(j.agentLog)
+	j.agentLog = ""
+	s.wakeLocked()
 	writeJSON(w, map[string]any{"id": j.ID})
 }
 
 func (s *server) listJobs(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]job, 0, len(s.jobs))
+	out := make([]*job, 0, len(s.jobs))
 	for i := len(s.jobs) - 1; i >= 0; i-- {
 		j := s.jobs[i]
-		c := *j
-		c.Log = j.log.String()
-		c.log = bytes.Buffer{}
-		out = append(out, c)
+		if j.Auto && j.State == "ok" {
+			continue
+		}
+		j.Log = j.ctlLog.String() + j.agentLog
+		out = append(out, j)
 	}
 	writeJSON(w, map[string]any{"jobs": out})
 }
 
-// newJob registers a job for vm, unless one is already running for it.
-func (s *server) newJob(kind, vm, prompt string) (*job, error) {
+// newJob registers a job for vm, unless one is already active for it.
+func (s *server) newJob(kind, vm, prompt string, auto bool) (*job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.newJobLocked(kind, vm, prompt, auto)
+}
+
+func (s *server) newJobLocked(kind, vm, prompt string, auto bool) (*job, error) {
 	for _, j := range s.jobs {
-		if j.VM == vm && j.State == "running" {
+		if j.VM == vm && (j.State == "running" || j.State == "queued") {
 			return nil, fmt.Errorf("%s is busy with job %d (%s)", vm, j.ID, j.Kind)
 		}
 		// A new attempt supersedes a login nobody finished.
 		if j.VM == vm && j.State == "login" {
-			j.State = "failed"
-			j.Ended = time.Now()
-			fmt.Fprintf(&j.log, "\nSuperseded by job %d.\n", s.nextID+1)
+			j.State, j.Ended = "failed", time.Now()
+			fmt.Fprintf(&j.ctlLog, "%s\nSuperseded by a newer job.\n", j.agentLog)
+			j.agentLog = ""
 		}
 	}
 	s.nextID++
-	j := &job{ID: s.nextID, Kind: kind, VM: vm, State: "running", Started: time.Now(), Prompt: prompt}
+	j := &job{ID: s.nextID, Kind: kind, VM: vm, State: "running", Started: time.Now(), Prompt: prompt, Auto: auto}
 	s.jobs = append(s.jobs, j)
-	if len(s.jobs) > 50 {
-		s.jobs = s.jobs[len(s.jobs)-50:]
+	if len(s.jobs) > 100 {
+		s.jobs = s.jobs[len(s.jobs)-100:]
 	}
 	return j, nil
 }
 
-func (s *server) spawn(w http.ResponseWriter, kind, vm, prompt string) {
-	j, err := s.newJob(kind, vm, prompt)
+// queue hands steps to vm's agent as a new job, and responds with its id.
+func (s *server) queue(w http.ResponseWriter, kind, vm, prompt string, auto bool, steps [][]string, then func(*job)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.vms[vm] == nil {
+		httpError(w, http.StatusBadRequest, "%s isn't managed by this app; adopt it first", vm)
+		return
+	}
+	j, err := s.newJobLocked(kind, vm, prompt, auto)
 	if err != nil {
 		httpError(w, http.StatusConflict, "%v", err)
 		return
 	}
-	go func() {
-		var args []string
-		switch kind {
-		case "rm":
-			args = []string{"rm", vm}
-		default:
-			args = []string{vm}
-			if prompt != "" {
-				args = append(args, prompt)
-			}
-		}
-		s.finish(j, s.run(j, args...))
-	}()
+	j.steps, j.then, j.State, j.queued = steps, then, "queued", time.Now()
+	s.wakeLocked()
 	writeJSON(w, map[string]any{"id": j.ID})
 }
 
-func (s *server) run(j *job, args ...string) error {
-	shown := args
-	if args[0] == "login" {
-		shown = []string{"login", args[1], "CODE"}
-	}
-	s.appendLog(j, "$ vm "+shellQuote(shown)+"\n")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, s.vm, args...)
-	cmd.Stdout = logWriter{s, j}
-	cmd.Stderr = logWriter{s, j}
-	return cmd.Run()
+func (s *server) wakeLocked() {
+	close(s.wake)
+	s.wake = make(chan struct{})
 }
 
-func (s *server) finish(j *job, err error) {
+func (s *server) fail(j *job, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	j.State, j.Ended = "failed", time.Now()
+	fmt.Fprintf(&j.ctlLog, "\n%v\n", err)
+}
+
+func (s *server) finish(j *job, exit int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.finishLocked(j, exit)
+}
+
+func (s *server) finishLocked(j *job, exit int) {
 	j.Ended = time.Now()
 	switch {
-	case err == nil:
+	case exit == 0:
 		j.State = "ok"
-	case exitCode(err) == 3:
-		if m := loginURLRE.FindStringSubmatch(j.log.String()); m != nil {
-			j.State = "login"
-			j.LoginURL = m[1]
-			return
-		}
-		fallthrough
+	case exit == 3 && loginURLRE.MatchString(j.agentLog):
+		j.State = "login"
+		j.LoginURL = loginURLRE.FindStringSubmatch(j.agentLog)[1]
 	default:
 		j.State = "failed"
-		fmt.Fprintf(&j.log, "\n%v\n", err)
+		fmt.Fprintf(&j.ctlLog, "%s\nexit status %d\n", j.agentLog, exit)
+		j.agentLog = ""
 	}
-}
-
-type logWriter struct {
-	s *server
-	j *job
-}
-
-func (lw logWriter) Write(p []byte) (int, error) {
-	lw.s.appendLog(lw.j, string(p))
-	return len(p), nil
 }
 
 func (s *server) appendLog(j *job, text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	j.log.WriteString(text)
-	if j.log.Len() > maxLog {
-		b := j.log.Bytes()
-		j.log = *bytes.NewBuffer(append([]byte("…\n"), b[len(b)-maxLog/2:]...))
+	j.ctlLog.WriteString(text)
+	if j.ctlLog.Len() > maxLog {
+		b := j.ctlLog.Bytes()
+		j.ctlLog = *bytes.NewBuffer(append([]byte("…\n"), b[len(b)-maxLog/2:]...))
 	}
 }
 
-func exitCode(err error) int {
-	if ee, ok := err.(*exec.ExitError); ok {
-		return ee.ExitCode()
+// janitor fails jobs no agent picks up or finishes, and queues the hourly
+// backups.
+func (s *server) janitor() {
+	lastBackup := map[string]time.Time{}
+	for range time.Tick(30 * time.Second) {
+		s.mu.Lock()
+		now := time.Now()
+		for _, j := range s.jobs {
+			switch {
+			case j.State == "queued" && now.Sub(j.queued) > pickupTimeout:
+				j.State, j.Ended = "failed", now
+				fmt.Fprintf(&j.ctlLog, "\n%s's agent didn't pick this up within %v. Is the VM running? A VM made by the vm script needs vm-child installed first.\n", j.VM, pickupTimeout)
+			case j.State == "running" && !j.picked.IsZero() && now.Sub(j.picked) > runTimeout:
+				j.State, j.Ended = "failed", now
+				fmt.Fprintf(&j.ctlLog, "%s\nThe agent didn't finish within %v.\n", j.agentLog, runTimeout)
+				j.agentLog = ""
+			}
+		}
+		for name := range s.vms {
+			if now.Sub(s.lastPoll[name]) > agentFresh || now.Sub(lastBackup[name]) < backupInterval {
+				continue
+			}
+			if j, err := s.newJobLocked("backup", name, "", true); err == nil {
+				j.steps, j.State, j.queued = [][]string{{"backup"}}, "queued", now
+				lastBackup[name] = now
+				s.wakeLocked()
+			}
+		}
+		s.mu.Unlock()
 	}
-	return -1
+}
+
+// --- backups ---
+
+func (s *server) listBackups(w http.ResponseWriter, r *http.Request) {
+	entries, err := os.ReadDir(s.backups)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		httpError(w, http.StatusInternalServerError, "%v", err)
+		return
+	}
+	type backup struct {
+		Name     string    `json:"name"`
+		Files    int       `json:"files"`
+		Bytes    int64     `json:"bytes"`
+		Sessions int       `json:"sessions"`
+		Latest   time.Time `json:"latest"`
+	}
+	out := []backup{}
+	for _, e := range entries {
+		if !e.IsDir() || !nameRE.MatchString(e.Name()) {
+			continue
+		}
+		b := backup{Name: e.Name()}
+		filepath.WalkDir(filepath.Join(s.backups, e.Name()), func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			b.Files++
+			b.Bytes += info.Size()
+			if info.ModTime().After(b.Latest) {
+				b.Latest = info.ModTime()
+			}
+			// A main claude session, not a subagent's.
+			if strings.HasSuffix(p, ".jsonl") && !strings.Contains(p, "/subagents/") && strings.Contains(p, "/claude/projects/") {
+				b.Sessions++
+			}
+			return nil
+		})
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Latest.After(out[j].Latest) })
+	writeJSON(w, map[string]any{"backups": out, "dir": s.backups})
+}
+
+// downloadBackup streams NAME's backup as a .tar.gz.
+func (s *server) downloadBackup(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSuffix(r.PathValue("name"), ".tar.gz")
+	root := filepath.Join(s.backups, name)
+	if !nameRE.MatchString(name) {
+		http.NotFound(w, r)
+		return
+	}
+	if _, err := os.Stat(root); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-transcripts.tar.gz"`, name))
+	gz := gzip.NewWriter(w)
+	tw := tar.NewWriter(gz)
+	if err := tw.AddFS(os.DirFS(root)); err != nil {
+		log.Printf("download %s: %v", name, err)
+	}
+	tw.Close()
+	gz.Close()
+}
+
+// Where each path in an agent's backup goes under ~/vm-transcripts/NAME:
+// the same layout the vm-backup script makes.
+var backupPaths = []struct{ from, to string }{
+	{".claude/projects/", "claude/projects/"},
+	{".claude/history.jsonl", "claude/history.jsonl"},
+	{".codex/sessions/", "codex/sessions/"},
+	{".cache/vm-backup/shelley.db", "shelley/shelley.db"},
+}
+
+func backupPath(name string) (string, bool) {
+	name = path.Clean(strings.TrimPrefix(name, "./"))
+	if strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") {
+		return "", false
+	}
+	for _, p := range backupPaths {
+		if strings.HasSuffix(p.from, "/") && strings.HasPrefix(name, p.from) {
+			return p.to + strings.TrimPrefix(name, p.from), true
+		}
+		if name == p.from {
+			return p.to, true
+		}
+	}
+	return "", false
+}
+
+// agentBackup stores the files in an agent's .tar.gz under its own VM's
+// directory. Only regular files on the known paths are kept, and nothing is
+// ever deleted.
+func (s *server) agentBackup(w http.ResponseWriter, r *http.Request) {
+	vm := r.Header.Get("X-Exedev-Source-Vm")
+	root := filepath.Join(s.backups, vm)
+	gz, err := gzip.NewReader(http.MaxBytesReader(w, r.Body, 4<<30))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	tr := tar.NewReader(gz)
+	n := 0
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			httpError(w, http.StatusBadRequest, "after %d files: %v", n, err)
+			return
+		}
+		if h.Typeflag != tar.TypeReg {
+			continue
+		}
+		rel, ok := backupPath(h.Name)
+		if !ok {
+			continue
+		}
+		dst := filepath.Join(root, filepath.FromSlash(rel))
+		if err := writeFile(dst, tr, h.ModTime); err != nil {
+			httpError(w, http.StatusInternalServerError, "%v", err)
+			return
+		}
+		n++
+	}
+	s.mu.Lock()
+	if m := s.vms[vm]; m != nil {
+		m.LastBackup = time.Now()
+		s.saveLocked()
+	}
+	s.mu.Unlock()
+	writeJSON(w, map[string]any{"files": n})
+}
+
+func writeFile(dst string, r io.Reader, mtime time.Time) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(dst), ".part-*")
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return err
+	}
+	os.Chtimes(f.Name(), mtime, mtime)
+	return os.Rename(f.Name(), dst)
+}
+
+// --- agents ---
+
+func (s *server) agentScript(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, filepath.Join(s.repo, "vm-child"))
+}
+
+func (s *server) scriptVersion() string {
+	b, err := os.ReadFile(filepath.Join(s.repo, "vm-child"))
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// agentPoll hands the agent its VM's next job, waiting up to 50s for one.
+func (s *server) agentPoll(w http.ResponseWriter, r *http.Request) {
+	vm := r.Header.Get("X-Exedev-Source-Vm")
+	deadline := time.After(50 * time.Second)
+	// An agent runs one job at a time, so a job it took and never finished
+	// is lost, say to a restart of the VM.
+	s.mu.Lock()
+	for _, j := range s.jobs {
+		if j.VM == vm && j.State == "running" && !j.picked.IsZero() && !j.reported {
+			j.State, j.Ended = "failed", time.Now()
+			fmt.Fprintf(&j.ctlLog, "%s\n%s's agent stopped before finishing this.\n", j.agentLog, vm)
+			j.agentLog = ""
+		}
+	}
+	s.mu.Unlock()
+	for {
+		resp := map[string]any{"version": s.scriptVersion()}
+		s.mu.Lock()
+		s.lastPoll[vm] = time.Now()
+		var next *job
+		for _, j := range s.jobs {
+			if j.VM == vm && j.State == "queued" {
+				next = j
+				break
+			}
+		}
+		if next != nil {
+			next.State, next.picked = "running", time.Now()
+			resp["job"] = map[string]any{"id": next.ID, "steps": next.steps}
+			s.mu.Unlock()
+			writeJSON(w, resp)
+			return
+		}
+		wake := s.wake
+		s.mu.Unlock()
+		select {
+		case <-wake:
+		case <-deadline:
+			writeJSON(w, resp)
+			return
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (s *server) agentReport(w http.ResponseWriter, r *http.Request) {
+	vm := r.Header.Get("X-Exedev-Source-Vm")
+	var req struct {
+		Log  string
+		Done bool
+		Exit int
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	s.mu.Lock()
+	var j *job
+	for _, jj := range s.jobs {
+		if fmt.Sprint(jj.ID) == r.PathValue("id") && jj.VM == vm && jj.State == "running" {
+			j = jj
+		}
+	}
+	if j == nil {
+		s.mu.Unlock()
+		httpError(w, http.StatusNotFound, "no such running job for %s", vm)
+		return
+	}
+	j.agentLog = req.Log
+	var then func(*job)
+	if req.Done {
+		j.reported = true
+		if req.Exit == 0 && j.then != nil {
+			then = j.then
+		} else {
+			s.finishLocked(j, req.Exit)
+		}
+	}
+	s.mu.Unlock()
+	if then != nil {
+		go then(j)
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// agentBundle is what vm-child setup needs: the notes and agents from the
+// repo, the VM's settings and the secrets, as a .tar.gz.
+func (s *server) agentBundle(w http.ResponseWriter, r *http.Request) {
+	vm := r.Header.Get("X-Exedev-Source-Vm")
+	s.mu.Lock()
+	kind := s.vms[vm].Kind
+	s.mu.Unlock()
+	if s.gh == "" || s.bb == "" {
+		httpError(w, http.StatusFailedDependency, "vm-web has no VM_GITHUB_TOKEN or VM_BUILDBUDDY_API_KEY")
+		return
+	}
+	dispatcher := ""
+	if kind == "dispatcher" {
+		dispatcher = "1"
+	}
+	vars := func(kv ...string) []byte {
+		var b bytes.Buffer
+		for i := 0; i < len(kv); i += 2 {
+			fmt.Fprintf(&b, "%s=%s\n", kv[i], shellQuote([]string{kv[i+1]}))
+		}
+		return b.Bytes()
+	}
+	gen := map[string][]byte{
+		"config": vars("name", vm, "dispatcher", dispatcher,
+			"git_name", env("VM_GIT_NAME", "Dan Stowell"), "git_email", env("VM_GIT_EMAIL", "dan@buildbuddy.io"),
+			"shelley_model", env("VM_SHELLEY_MODEL", "gpt-6.1-sol"), "claude_email", env("VM_CLAUDE_EMAIL", "dstowell@gmail.com")),
+		"secrets": vars("gh_token", s.gh, "bb_api_key", s.bb),
+	}
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, pat := range bundleFiles {
+		matches, _ := filepath.Glob(filepath.Join(s.repo, pat))
+		if len(matches) == 0 {
+			httpError(w, http.StatusInternalServerError, "no %s in %s", pat, s.repo)
+			return
+		}
+		for _, m := range matches {
+			b, err := os.ReadFile(m)
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, "%v", err)
+				return
+			}
+			rel, _ := filepath.Rel(s.repo, m)
+			gen[filepath.ToSlash(rel)] = b
+		}
+	}
+	names := make([]string, 0, len(gen))
+	for n := range gen {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		tw.WriteHeader(&tar.Header{Name: n, Mode: 0o600, Size: int64(len(gen[n])), ModTime: time.Now()})
+		tw.Write(gen[n])
+	}
+	tw.Close()
+	gz.Close()
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Write(buf.Bytes())
+}
+
+func env(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
 
 func shellQuote(args []string) string {

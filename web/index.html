@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>vm</title>
+<title>spawn</title>
 <style>
 :root {
   --bg: #f7f7f5; --panel: #fff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
@@ -63,7 +63,7 @@ a { color: var(--accent); }
 .job:first-child { border-top: 0; }
 .job-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .state { font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
-.state.running { color: var(--accent); } .state.ok { color: var(--ok); }
+.state.running, .state.queued { color: var(--accent); } .state.ok { color: var(--ok); }
 .state.login { color: var(--warn); } .state.failed { color: var(--bad); }
 details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 6px; }
 pre.log {
@@ -73,6 +73,19 @@ pre.log {
 .login { margin-top: 10px; padding: 12px; border: 1px solid var(--warn); border-radius: 8px; display: grid; gap: 8px; }
 .empty { padding: 14px; }
 .err { color: var(--bad); font-size: 14px; }
+.kind { display: flex; gap: 6px; }
+.kind label { display: flex; gap: 8px; align-items: flex-start; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: pointer; flex: 1; min-width: 0; }
+.kind label:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.kind input { width: auto; margin: 3px 0 0; }
+.kind small { display: block; color: var(--muted); font-size: 12.5px; }
+.tag.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+.tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.tag.disp { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.adopt { display: none; gap: 8px; font-size: 13.5px; }
+.adopt.open { display: grid; }
+.backup { padding: 10px 14px; border-top: 1px solid var(--line); display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.backup:first-child { border-top: 0; }
+@media (max-width: 560px) { .kind { flex-direction: column; } }
 </style>
 </head>
 <body>
@@ -88,8 +101,12 @@ pre.log {
         pattern="[a-z][a-z0-9]*(-[a-z0-9]+)*" minlength="5" maxlength="52" style="flex:1; min-width: 200px">
       <button class="primary" type="submit">Start VM</button>
     </div>
-    <textarea id="new-prompt" placeholder="Optional first prompt for claude"></textarea>
-    <div class="muted" style="font-size:13px">Creates the VM (or reuses one with that name), clones the repos on a branch named after it, and starts claude with Remote Control.</div>
+    <div class="kind">
+      <label><input type="radio" name="kind" value="classic" checked><span>Classic<small>A coordinator claude for one thread of work.</small></span></label>
+      <label><input type="radio" name="kind" value="dispatcher"><span>Dispatcher<small>Your home base: tracks threads in an issue, suggests focus, reviews PRs every 2h.</small></span></label>
+    </div>
+    <textarea id="new-prompt" placeholder="Optional first prompt for claude (a dispatcher starts with “Good morning!” without one)"></textarea>
+    <div class="muted" style="font-size:13px">Creates the VM (or sets up again one this app already manages), clones the repos on a branch named after it, and starts claude with Remote Control.</div>
     <div class="err" id="new-err"></div>
   </form>
 
@@ -99,6 +116,10 @@ pre.log {
 
   <h2>Activity</h2>
   <div class="panel" id="jobs"><div class="empty muted">Nothing yet.</div></div>
+
+  <h2>Transcript backups</h2>
+  <div class="panel" id="backups"><div class="empty muted">Loading…</div></div>
+  <div class="muted" id="backups-dir" style="font-size:13px; margin-top:6px"></div>
 </main>
 
 <script>
@@ -121,28 +142,43 @@ async function api(method, path, body) {
 async function loadVMs() {
   const el = $("#vms");
   try {
-    const {vms, self} = await api("GET", "/api/vms");
+    const {vms, self, ctl_url: ctl, tag} = await api("GET", "/api/vms");
     const drafts = {};  // keep half-written prompts across refreshes
-    el.querySelectorAll(".vm").forEach(r => drafts[r.dataset.name] = $(".prompt-box textarea", r).value);
+    el.querySelectorAll(".vm").forEach(r => drafts[r.dataset.name] = $(".prompt-box textarea", r)?.value || "");
     if (!vms.length) { el.innerHTML = `<div class="empty muted">No VMs.</div>`; return; }
     el.innerHTML = vms.map(v => {
-      const n = v.vm_name, isSelf = n === self;
+      const n = v.vm_name, isSelf = n === self, m = v.managed;
       const ssh = `ssh -t ${v.ssh_dest || n + ".exe.xyz"} tmux attach -t claude`;
-      return `<div class="vm" data-name="${esc(n)}">
+      const seen = v.agent_seen ? (Date.now() - new Date(v.agent_seen)) / 1000 : Infinity;
+      const agent = !m ? "" : seen < 120 ? `<span class="tag ok">agent online</span>`
+        : `<span class="tag warn">${v.agent_seen ? `agent last seen ${ago(v.agent_seen)}` : "agent not seen yet"}</span>`;
+      const install = `ssh exe.dev tag ${n} ${tag}\nssh ${n}.exe.xyz 'curl -fsS ${ctl}/agent/vm-child -o /tmp/vm-child && bash /tmp/vm-child install ${ctl}'`;
+      return `<div class="vm" data-name="${esc(n)}" data-kind="${esc(m?.kind || "")}">
         <div class="vm-head">
           <span class="dot ${esc(v.status)}"></span>
           <span class="vm-name">${esc(n)}</span>
+          ${m ? `<span class="tag ${m.kind === "dispatcher" ? "disp" : ""}">${esc(m.kind)}</span>` : ""}
           <span class="tag">${esc(v.status)}</span>
-          ${v.region ? `<span class="tag">${esc(v.region)}</span>` : ""}
-          ${isSelf ? `<span class="tag">this app</span>` : ""}
+          ${agent}
+          ${m?.last_backup ? `<span class="tag">backed up ${ago(m.last_backup)}</span>` : ""}
+          ${isSelf ? `<span class="tag">this app</span>` : !m ? `<span class="tag">not managed here</span>` : ""}
           <span class="spacer"></span>
           <span class="actions">
-            ${isSelf ? "" : `<button data-act="prompt">Prompt</button>`}
+            ${m ? `<button data-act="prompt">Prompt</button>
+              <button data-act="setup" title="Refresh notes, agents and settings, and start claude if it isn't running">Set up again</button>
+              <button data-act="switch">Make ${m.kind === "dispatcher" ? "classic" : "dispatcher"}</button>
+              <button data-act="backup">Back up</button>` : ""}
+            ${!m && !isSelf ? `<button data-act="adopt">Adopt</button>` : ""}
             ${v.https_url ? `<a href="${esc(v.https_url)}" target="_blank" rel="noopener"><button>Open</button></a>` : ""}
-            ${isSelf ? "" : `<button class="danger" data-act="rm">Delete</button>`}
+            ${m ? `<button class="danger" data-act="rm">Delete</button>` : ""}
           </span>
         </div>
         ${isSelf ? "" : `<div class="cmd"><code>${esc(ssh)}</code><button data-copy="${esc(ssh)}">copy</button></div>`}
+        ${m && !v.agent_seen ? `<div class="adopt open muted">If this VM came from the vm script, install its agent from your laptop:
+          <div class="cmd"><code style="white-space:pre">${esc(install)}</code><button data-copy="${esc(install)}">copy</button></div>
+          <span>Or <a href="#" data-act="forget">stop managing it</a>.</span></div>` : ""}
+        ${!m && !isSelf ? `<div class="adopt adopt-box muted">Manage ${esc(n)} from here: prompts, backups and delete go through its agent, which you then install from your laptop.
+          <div class="row"><button data-act="adopt-as" data-kind="classic">Adopt as classic</button><button data-act="adopt-as" data-kind="dispatcher">Adopt as dispatcher</button></div></div>` : ""}
         <div class="prompt-box ${openPrompts.has(n) ? "open" : ""}">
           <textarea placeholder="Sent to claude on ${esc(n)} (starts claude if it isn't running)">${esc(drafts[n] || "")}</textarea>
           <div class="row"><button class="primary" data-act="send">Send</button></div>
@@ -165,21 +201,21 @@ function markBusy() {
   });
 }
 
-const kindLabel = {start: "Start", prompt: "Prompt", rm: "Delete"};
+const kindLabel = {start: "Start", prompt: "Prompt", rm: "Delete", setup: "Set up", backup: "Back up"};
 function ago(t) {
   const s = Math.round((Date.now() - new Date(t)) / 1000);
-  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s/60)}m ago` : `${Math.round(s/3600)}h ago`;
+  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s/60)}m ago` : s < 172800 ? `${Math.round(s/3600)}h ago` : `${Math.round(s/86400)}d ago`;
 }
 
 let lastJobs = "";
 async function loadJobs() {
   let jobs;
   try { ({jobs} = await api("GET", "/api/jobs")); } catch { return; }
-  const nowBusy = new Set(jobs.filter(j => j.state === "running").map(j => j.vm));
+  const nowBusy = new Set(jobs.filter(j => j.state === "running" || j.state === "queued").map(j => j.vm));
   const finished = [...busy].some(v => !nowBusy.has(v));
   busy = nowBusy;
   markBusy();
-  if (finished) loadVMs();
+  if (finished) { loadVMs(); loadBackups(); }
 
   const sig = JSON.stringify(jobs);
   if (sig === lastJobs) return;
@@ -193,13 +229,13 @@ async function loadJobs() {
     const tail = j.log.split("\n").filter(Boolean).slice(-1)[0] || "";
     return `<div class="job" data-id="${j.id}">
       <div class="job-head">
-        <span class="state ${j.state}">${j.state === "login" ? "needs login" : j.state}</span>
+        <span class="state ${j.state}">${j.state === "login" ? "needs login" : j.state === "queued" ? "waiting for VM" : j.state}</span>
         <strong>${esc(kindLabel[j.kind] || j.kind)} ${esc(j.vm)}</strong>
         <span class="muted" style="font-size:13px">${ago(j.started)}</span>
         ${j.state === "failed" && j.kind === "start" && !busy.has(j.vm)
           ? `<button data-retry="${j.id}" style="padding:1px 8px; font-size:12px">retry</button>` : ""}
       </div>
-      ${j.state === "running" ? `<div class="muted" style="font-size:13px; margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(tail)}</div>` : ""}
+      ${j.state === "running" || j.state === "queued" ? `<div class="muted" style="font-size:13px; margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${esc(tail)}</div>` : ""}
       ${j.state === "login" ? `<div class="login">
         <div>claude on <strong>${esc(j.vm)}</strong> needs a one-time claude.ai login.
           <a href="${esc(j.login_url)}" target="_blank" rel="noopener">Sign in</a>, then paste the code it shows.</div>
@@ -218,7 +254,7 @@ $("#new").addEventListener("submit", async e => {
   e.preventDefault();
   $("#new-err").textContent = "";
   try {
-    await api("POST", "/api/vms", {name: $("#new-name").value.trim(), prompt: $("#new-prompt").value});
+    await api("POST", "/api/vms", {name: $("#new-name").value.trim(), prompt: $("#new-prompt").value, kind: $("input[name=kind]:checked").value});
     $("#new-name").value = ""; $("#new-prompt").value = "";
     loadJobs();
   } catch (err) { $("#new-err").textContent = err.message; }
@@ -233,7 +269,7 @@ $("#vms").addEventListener("click", async e => {
     copy.textContent = "copied"; setTimeout(() => copy.textContent = "copy", 1200);
     return;
   }
-  const btn = e.target.closest("button[data-act]");
+  const btn = e.target.closest("[data-act]");
   if (!btn) return;
   const row = btn.closest(".vm"), name = row.dataset.name;
   try {
@@ -251,6 +287,24 @@ $("#vms").addEventListener("click", async e => {
       if (!confirm(`Back up ${name}'s transcripts, then delete ${name}? This can't be undone.`)) return;
       await api("POST", `/api/vms/${encodeURIComponent(name)}/rm`, {});
       loadJobs();
+    } else if (btn.dataset.act === "setup" || btn.dataset.act === "switch") {
+      const kind = btn.dataset.act === "switch" ? (row.dataset.kind === "dispatcher" ? "classic" : "dispatcher") : row.dataset.kind;
+      if (btn.dataset.act === "switch" && !confirm(`Make ${name} a ${kind} VM? This sets it up again; a running claude keeps its old instructions until you restart it.`)) return;
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/setup`, {kind});
+      loadJobs(); loadVMs();
+    } else if (btn.dataset.act === "backup") {
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/backup`, {});
+      loadJobs();
+    } else if (btn.dataset.act === "adopt") {
+      $(".adopt-box", row).classList.toggle("open");
+    } else if (btn.dataset.act === "adopt-as") {
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/adopt`, {kind: btn.dataset.kind});
+      loadVMs();
+    } else if (btn.dataset.act === "forget") {
+      e.preventDefault();
+      if (!confirm(`Stop managing ${name}? The VM itself is left alone.`)) return;
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/forget`, {});
+      loadVMs();
     }
   } catch (err) { alert(err.message); }
 });
@@ -277,8 +331,26 @@ $("#jobs").addEventListener("click", async e => {
   catch (err) { $(".err", box).textContent = err.message; btn.disabled = false; }
 });
 
+function size(b) {
+  return b < 1 << 20 ? `${Math.round(b / 1024)} KB` : b < 1 << 30 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${(b / (1 << 30)).toFixed(2)} GB`;
+}
+async function loadBackups() {
+  const el = $("#backups");
+  try {
+    const {backups, dir} = await api("GET", "/api/backups");
+    $("#backups-dir").textContent = `In ${dir} on this VM. Managed VMs back up hourly and before they're deleted; nothing is ever removed.`;
+    el.innerHTML = backups.length ? backups.map(b => `<div class="backup">
+      <strong>${esc(b.name)}</strong>
+      <span class="muted" style="font-size:13px">${b.sessions} sessions · ${b.files} files · ${size(b.bytes)} · latest ${ago(b.latest)}</span>
+      <span class="spacer"></span>
+      <a href="/api/backups/${encodeURIComponent(b.name)}.tar.gz" style="font-size:13px">download</a>
+    </div>`).join("") : `<div class="empty muted">No backups yet.</div>`;
+  } catch (e) { el.innerHTML = `<div class="empty err">${esc(e.message)}</div>`; }
+}
+
 loadVMs();
 loadJobs();
+loadBackups();
 // Poll only while the tab is visible, and catch up as soon as it is again.
 setInterval(() => document.hidden || loadJobs(), 2000);
 setInterval(() => document.hidden || loadVMs(), 30000);

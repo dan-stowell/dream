@@ -1,17 +1,20 @@
-# Runs vm-web on port 8000, private behind exe.dev's proxy at
-# https://VMNAME.exe.xyz:8000/. Install:
+# Runs vm-web: the UI on port 8000, private behind exe.dev's proxy at
+# https://VMNAME.exe.xyz:8000/, and the VMs' agents on port 8001, reached
+# through the peer integration. Setup steps are in README.md. Install:
 #   sudo cp ~/dream/web/vm-web.service /etc/systemd/system/
 #   sudo systemctl enable --now vm-web
 [Unit]
 Description=vm web app
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 User=exedev
 WorkingDirectory=/home/exedev/dream/web
-EnvironmentFile=/home/exedev/.config/vm/secrets
+# VM_GITHUB_TOKEN and VM_BUILDBUDDY_API_KEY, handed to the VMs at setup.
+EnvironmentFile=-/home/exedev/.config/vm/secrets
 ExecStartPre=/usr/local/bin/go build -o vm-web .
-ExecStart=/home/exedev/dream/web/vm-web -addr :8000
+ExecStart=/home/exedev/dream/web/vm-web -addr :8000 -agent-addr :8001
 Restart=on-failure
 Environment=HOME=/home/exedev GOCACHE=/home/exedev/.cache/go-build
 

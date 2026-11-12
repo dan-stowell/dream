@@ -1,0 +1,398 @@
+#!/usr/bin/env bash
+# vm-child runs on a VM that vm-web created. It does on the VM what the vm
+# script does over SSH, but takes its orders from vm-web instead: vm-web holds
+# no SSH access to the VMs, and the VM reaches vm-web through an exe.dev peer
+# integration, which tells vm-web which VM is calling.
+#
+#   vm-child install CTL   install this script and the vm-agent service, which
+#                          polls CTL (the integration's URL) for jobs. The VM's
+#                          setup script runs this at first boot.
+#   vm-child agent         the service: run jobs from CTL, one at a time.
+#   vm-child setup         fetch the bundle (notes, agents, secrets, settings)
+#                          from CTL and set up the VM, like a run of vm NAME.
+#   vm-child start [PROMPT]  start claude in tmux, or paste PROMPT into it.
+#                          Without a claude.ai login, starts one in tmux,
+#                          prints "vm: sign in at URL" and exits 3.
+#   vm-child login CODE    finish that login.
+#   vm-child backup        send transcripts changed since the last backup to CTL.
+set -euo pipefail
+
+if [ "$(id -u)" = 0 ]; then
+  # Setup scripts may run as root; everything here belongs to exedev.
+  exec sudo -u exedev -H bash "$0" "$@"
+fi
+export HOME=${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6)}
+export PATH="$HOME/.local/bin:$PATH"
+
+self=$HOME/.local/bin/vm-child
+state=$HOME/.cache/vm-child
+mkdir -p "$state" ~/.config/vm
+ctl=$(cat ~/.config/vm/ctl 2>/dev/null || true)
+
+# Matches the sign-in URL in claude auth login's output.
+login_url_re='(https://claude\.com/cai/oauth/authorize[^[:space:][:cntrl:]]+)'
+
+ctl_curl() {
+  curl -fsS --retry 3 --retry-all-errors --retry-delay 2 "$@"
+}
+
+cmd_install() {
+  ctl=${1:?usage: vm-child install CTL}
+  echo "$ctl" >~/.config/vm/ctl
+  if [ "$(readlink -f "$0")" != "$(readlink -f "$self" 2>/dev/null)" ]; then
+    install -D -m 0755 "$0" "$self"
+  fi
+  # KillMode=process: the tmux server that claude runs in is started from
+  # this service, and has to outlive restarts of it.
+  sudo tee /etc/systemd/system/vm-agent.service >/dev/null <<EOF
+[Unit]
+Description=vm-child agent: runs jobs from $ctl
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=$(id -un)
+Environment=HOME=$HOME
+Environment=PATH=$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$self agent
+Restart=always
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable vm-agent.service
+  sudo systemctl restart vm-agent.service
+  echo "vm-agent is polling $ctl"
+}
+
+cmd_agent() {
+  [ -n "$ctl" ] || { echo "vm-child: no ~/.config/vm/ctl; run vm-child install CTL" >&2; exit 1; }
+  local version resp latest id
+  version=$(sha256sum "$self" | cut -d' ' -f1)
+  echo "vm-agent $version polling $ctl"
+  while :; do
+    # vm-web holds the request open until there's a job, or for about 50s.
+    if ! resp=$(curl -fsS --max-time 75 -H 'Content-Type: application/json' \
+        -d "$(jq -nc --arg v "$version" '{version: $v}')" "$ctl/agent/poll"); then
+      sleep 5
+      continue
+    fi
+    id=$(jq -r '.job.id // empty' <<<"$resp")
+    [ -z "$id" ] || run_job "$id" "$(jq -c '.job.steps' <<<"$resp")"
+    # Update only between jobs: vm-web counts a job as lost once its agent
+    # polls again without reporting on it.
+    latest=$(jq -r '.version // empty' <<<"$resp")
+    if [ -n "$latest" ] && [ "$latest" != "$version" ] && update_self "$latest"; then
+      echo "vm-agent updated to $latest"
+      exec "$self" agent
+    fi
+  done
+}
+
+update_self() {
+  local tmp
+  tmp=$(mktemp)
+  if ctl_curl -o "$tmp" "$ctl/agent/vm-child" && [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$1" ] &&
+      bash -n "$tmp"; then
+    install -m 0755 "$tmp" "$self"
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# run_job ID STEPS runs each step (a vm-child command line) in turn, stopping
+# at the first failure, and keeps vm-web up to date with its output.
+run_job() {
+  local id=$1 steps=$2 log rc=0 n i pid
+  log=$(mktemp)
+  n=$(jq length <<<"$steps")
+  for ((i = 0; i < n; i++)); do
+    local -a step
+    mapfile -t step < <(jq -r ".[$i][]" <<<"$steps")
+    # Only the command is shown: a login step's argument is a code.
+    echo "\$ vm-child ${step[0]}" >>"$log"
+    "$self" "${step[@]}" >>"$log" 2>&1 </dev/null &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+      sleep 3
+      report "$id" "$log" false 0 || true
+    done
+    wait "$pid" && rc=0 || rc=$?
+    ((rc == 0)) || break
+  done
+  report "$id" "$log" true "$rc" || report "$id" "$log" true "$rc" || true
+  rm -f "$log"
+}
+
+report() {
+  tail -c 200000 "$2" | jq -Rsc --argjson done "$3" --argjson exit "$4" '{log: ., done: $done, exit: $exit}' |
+    curl -fsS --max-time 30 -H 'Content-Type: application/json' --data-binary @- "$ctl/agent/jobs/$1" >/dev/null
+}
+
+cmd_setup() {
+  local tmp
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' RETURN
+  (umask 077 && ctl_curl "$ctl/agent/bundle" | tar -xz -C "$tmp")
+  # config sets name, dispatcher, git_name, git_email, shelley_model and
+  # claude_email; secrets sets gh_token and bb_api_key.
+  . "$tmp/config"
+  . "$tmp/secrets"
+  echo "$claude_email" >~/.config/vm/claude-email
+  echo "$name" >~/.config/vm/name
+
+  gh auth login --hostname github.com --git-protocol https --with-token <<<"$gh_token"
+  gh auth setup-git --hostname github.com
+  git config --global user.name "$git_name"
+  git config --global user.email "$git_email"
+
+  # tmux starts login shells, which read ~/.profile.
+  (umask 077 && printf 'export BUILDBUDDY_API_KEY=%q\n' "$bb_api_key" >~/.config/vm/env)
+  grep -q 'config/vm/env' ~/.profile || echo '[ -f ~/.config/vm/env ] && . ~/.config/vm/env' >>~/.profile
+
+  if ! command -v bb >/dev/null; then
+    echo "Installing bb..."
+    local arch version bbtmp
+    arch=$(uname -m)
+    [ "$arch" = aarch64 ] && arch=arm64
+    version=$(curl -fsSI https://github.com/buildbuddy-io/bazel/releases/latest |
+      sed -n 's|^location: .*/tag/\([^[:space:]]*\).*|\1|ip')
+    bbtmp=$(mktemp -d)
+    curl -fsSL -o "$bbtmp/bb" "https://github.com/buildbuddy-io/bazel/releases/download/$version/bazel-$version-linux-$arch"
+    sudo install -m 0755 "$bbtmp/bb" /usr/local/bin/bb
+    rm -rf "$bbtmp"
+  fi
+  sudo ln -sf bb /usr/local/bin/bazel
+  sudo ln -sf bb /usr/local/bin/bazelisk
+
+  # Point codex at the exe.dev LLM integration, which carries Dan's ChatGPT
+  # sub, and let it reach RBE from its workspace-write sandbox: bb needs the
+  # network and a writable ~/.cache.
+  mkdir -p ~/.codex ~/.cache
+  cat >~/.codex/config.toml <<TOML
+model = "gpt-6-astra"
+model_provider = "exe-llm"
+
+[model_providers.exe-llm]
+name = "exe-llm"
+base_url = "https://llm.int.exe.xyz/v1"
+
+[sandbox_workspace_write]
+network_access = true
+writable_roots = ["$HOME/.cache"]
+TOML
+
+  local repo
+  for repo in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain podman-static; do
+    if [ ! -d ~/"$repo"/.git ]; then
+      echo "Cloning $repo..."
+      git clone --quiet --depth 1 "https://github.com/buildbuddy-io/$repo.git" ~/"$repo"
+      if git -C ~/"$repo" ls-remote --exit-code --heads origin "$name" >/dev/null; then
+        git -C ~/"$repo" remote set-branches --add origin "$name"
+        git -C ~/"$repo" fetch --quiet --depth 1 origin "$name"
+        git -C ~/"$repo" checkout --quiet -b "$name" --track "origin/$name"
+      else
+        git -C ~/"$repo" checkout --quiet -b "$name"
+      fi
+    fi
+  done
+
+  local guidance
+  guidance=$(cat "$tmp/vm-CLAUDE.md"; echo; cat "$tmp/vm-CLAUDE-buildbuddy.md")
+
+  # Codex gets the guidance, minus the bullet about asking codex for reviews,
+  # after the exe.dev note its AGENTS.md ships with (set aside on the first
+  # run, so reruns don't stack copies).
+  awk '/^- After every push, ask codex/ { skip = 1; next }
+       /^[-#]/ { skip = 0 }
+       !skip' <<<"$guidance" | (
+    cd ~/.codex &&
+      { [ -e AGENTS.exe-dev.md ] || cp AGENTS.md AGENTS.exe-dev.md 2>/dev/null || : >AGENTS.exe-dev.md; } &&
+      { [ "$(head -1 AGENTS.exe-dev.md)" != "# VM notes" ] || : >AGENTS.exe-dev.md; } &&
+      rm -f AGENTS.md && { cat AGENTS.exe-dev.md; echo; cat; } >AGENTS.md)
+
+  # Every claude and Shelley gets it whole.
+  mkdir -p ~/.claude/agents ~/.config/shelley/hooks
+  rm -f ~/.claude/CLAUDE.md
+  tee ~/.claude/CLAUDE.md >~/.config/shelley/AGENTS.md <<<"$guidance"
+
+  # The main claude coordinates the subagents; a dispatcher VM's main claude
+  # is also Dan's home base. Having dispatcher.md is what makes a VM a
+  # dispatcher.
+  cp "$tmp"/vm-agents/*.md ~/.claude/agents/
+  cp "$tmp/vm-coordinator.md" ~/.config/vm/coordinator.md
+  cp "$tmp/vm-coordinator-shelley.md" ~/.config/vm/coordinator-shelley.md
+  if [ -n "$dispatcher" ]; then
+    sed "s|VMNAME|$name|g" "$tmp/vm-dispatcher.md" >~/.config/vm/dispatcher.md
+  else
+    rm -f ~/.config/vm/dispatcher.md
+  fi
+
+  # Shelley coordinates too. Its system-prompt hook runs for subagents as
+  # well, so the coordinator notes go only to prompts that aren't a subagent's.
+  cat >~/.config/shelley/hooks/system-prompt <<'EOF'
+#!/bin/sh
+prompt=$(cat)
+printf '%s' "$prompt"
+case $prompt in
+  *"You are a subagent of Shelley"*) ;;
+  *) printf '\n\n'; cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/coordinator-shelley.md ;;
+esac
+EOF
+  chmod +x ~/.config/shelley/hooks/system-prompt
+
+  # Shelley's default model, via a drop-in; restarted only when that changes.
+  local exec_start conf dropin=/etc/systemd/system/shelley.service.d/vm.conf
+  if exec_start=$(grep "^ExecStart=" /etc/systemd/system/shelley.service 2>/dev/null); then
+    conf=$(printf "[Service]\nExecStart=\n%s\n" "${exec_start/ serve / -default-model $shelley_model serve }")
+    if [ "$(cat "$dropin" 2>/dev/null)" != "$conf" ]; then
+      sudo mkdir -p "${dropin%/*}"
+      sudo tee "$dropin" <<<"$conf" >/dev/null
+      sudo systemctl daemon-reload
+      sudo systemctl try-restart shelley.service
+    fi
+  fi
+  echo "Set up $name${dispatcher:+ as a dispatcher}."
+}
+
+cmd_start() {
+  local prompt=${1:-} name email url
+  name=$(cat ~/.config/vm/name)
+
+  # Remote Control needs a full claude.ai login; setup-token tokens can't do it.
+  if ! claude auth status >/dev/null 2>&1; then
+    email=$(cat ~/.config/vm/claude-email)
+    # A wide window, so the URL isn't wrapped.
+    tmux kill-session -t vm-login 2>/dev/null || true
+    tmux new-session -d -s vm-login -x 2000 -y 50 claude auth login --claudeai --email "$email"
+    url=
+    for _ in $(seq 30); do
+      if [[ $(tmux capture-pane -p -J -t vm-login) =~ $login_url_re ]]; then
+        url=${BASH_REMATCH[1]}
+        break
+      fi
+      sleep 1
+    done
+    if [ -z "$url" ]; then
+      echo "vm: claude auth login never showed a sign-in URL" >&2
+      exit 1
+    fi
+    echo "vm: claude needs a one-time login."
+    echo "vm: sign in at $url"
+    exit 3
+  fi
+
+  if ! tmux has-session -t claude 2>/dev/null; then
+    # Skip claude's first-run onboarding and the folder trust prompt for
+    # $HOME. Only touched while claude isn't running, since claude rewrites it.
+    [ -f ~/.claude.json ] || echo '{}' >~/.claude.json
+    jq --arg home "$HOME" '.hasCompletedOnboarding = true | .projects[$home].hasTrustDialogAccepted = true' \
+      ~/.claude.json >~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
+    # The VM is the sandbox, so skip permission prompts and their warning.
+    # Fullscreen renderer, Opus, and no attribution line in PR bodies.
+    mkdir -p ~/.claude
+    [ -f ~/.claude/settings.json ] || echo '{}' >~/.claude/settings.json
+    jq '.skipDangerousModePermissionPrompt = true | .tui = "fullscreen" | .model = "opus" | .attribution.pr = ""' \
+      ~/.claude/settings.json >~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
+
+    tmux new-session -d -s claude -c "$HOME"
+    local cmd="claude --dangerously-skip-permissions --remote-control $name"
+    if [ -e ~/.config/vm/dispatcher.md ]; then
+      cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/dispatcher.md)"'
+      # A dispatcher gets started on its day even without a prompt.
+      [ -n "$prompt" ] || prompt='Good morning! Set up for today, then tell me where you think I should focus.'
+    else
+      cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md)"'
+    fi
+    [ -z "$prompt" ] || cmd+=" $(printf %q "$prompt")"
+    tmux send-keys -t claude "$cmd" Enter
+    echo "Started claude (Remote Control: $name)."
+  elif [ -n "$prompt" ]; then
+    # Bracketed paste, so a multi-line prompt isn't submitted at its first newline.
+    printf '%s' "$prompt" | tmux load-buffer -b vm-prompt -
+    tmux paste-buffer -p -d -b vm-prompt -t claude
+    sleep 0.5
+    tmux send-keys -t claude Enter
+    echo "Sent the prompt to claude."
+  else
+    echo "claude is already running."
+  fi
+}
+
+cmd_login() {
+  local code=${1:?usage: vm-child login CODE}
+  tmux send-keys -t vm-login -l "$code"
+  tmux send-keys -t vm-login Enter
+  for _ in $(seq 30); do
+    if claude auth status >/dev/null 2>&1; then
+      tmux kill-session -t vm-login 2>/dev/null || true
+      echo "Logged in."
+      return 0
+    fi
+    sleep 2
+  done
+  echo "vm: login didn't complete; the code may be wrong or expired. Its screen:" >&2
+  tmux capture-pane -p -J -t vm-login | awk NF >&2 || true
+  tmux kill-session -t vm-login 2>/dev/null || true
+  exit 1
+}
+
+# Sends every transcript file changed since the last successful backup, in
+# batches of about 64MB so no one upload gets too big. vm-web never deletes
+# from its copy, so transcripts outlive the VM and claude's own cleanup.
+cmd_backup() {
+  cd ~
+  local stamp=$state/backup-stamp next=$state/backup-stamp.next sum
+  touch "$next"
+  local -a files=()
+  if [ -f ~/.config/shelley/shelley.db ]; then
+    # Shelley writes to its database while running, so snapshot it.
+    mkdir -p ~/.cache/vm-backup
+    sqlite3 ~/.config/shelley/shelley.db ".backup $HOME/.cache/vm-backup/shelley.db"
+    sum=$(sha256sum ~/.cache/vm-backup/shelley.db | cut -d' ' -f1)
+    [ "$sum" = "$(cat "$state/shelley.sum" 2>/dev/null)" ] || files+=(.cache/vm-backup/shelley.db)
+  fi
+  local -a newer=()
+  [ ! -e "$stamp" ] || newer=(-newer "$stamp")
+  local rec size path batch=() batch_size=0 sent=0
+  while IFS= read -r -d '' rec; do
+    size=${rec%% *} path=${rec#* }
+    if ((${#batch[@]} && batch_size + size > 64 << 20)); then
+      send_batch "${batch[@]}"
+      sent=$((sent + ${#batch[@]})) batch=() batch_size=0
+    fi
+    batch+=("$path") batch_size=$((batch_size + size))
+  done < <(
+    for p in .claude/projects .claude/history.jsonl .codex/sessions; do
+      [ ! -e "$p" ] || find "$p" -type f "${newer[@]}" -printf '%s %p\0'
+    done
+    for p in "${files[@]}"; do printf '%s %s\0' "$(stat -c %s "$p")" "$p"; done
+  )
+  if ((${#batch[@]})); then
+    send_batch "${batch[@]}"
+    sent=$((sent + ${#batch[@]}))
+  fi
+  mv "$next" "$stamp"
+  [ -z "${sum:-}" ] || echo "$sum" >"$state/shelley.sum"
+  echo "Backed up $sent changed files."
+}
+
+send_batch() {
+  printf '%s\0' "$@" | tar --null -T - -czf - |
+    ctl_curl --max-time 600 -H 'Content-Type: application/gzip' --data-binary @- "$ctl/agent/backup" >/dev/null
+}
+
+cmd=${1:-}
+(($#)) && shift
+case $cmd in
+  install | agent | setup | start | login | backup) "cmd_$cmd" "$@" ;;
+  *)
+    sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
+    exit 2
+    ;;
+esac
