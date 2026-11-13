@@ -1,22 +1,23 @@
-## Repos
+# VM notes
 
-- REPOS, reached through exe.dev's GitHub integration at
-  github.int.exe.xyz rather than github.com. There's no GitHub token on this
-  VM, and only these repos are reachable.
-- `git push` and `gh` both go through the integration (`GH_HOST` is already
-  set to github.int.exe.xyz), so pass `-R OWNER/REPO` to `gh`. A public repo
-  fetches from github.com, which is what `bb remote`'s runners clone; a
-  private one can't be cloned by them, so `bb remote` won't work there.
-- These repos don't define `--config=remote-minimal`, so wherever the notes
-  above say to pass it, pass its flags yourself instead, after the bazel
-  command: `bb remote test //some:target
-  --remote_executor=grpcs://buildbuddy.buildbuddy.io
-  --remote_cache=grpcs://buildbuddy.buildbuddy.io
-  --bes_backend=grpcs://buildbuddy.buildbuddy.io
-  --bes_results_url=https://buildbuddy.buildbuddy.io/invocation/
-  --remote_download_minimal --jobs=100`.
-- There's no lint run set up for these repos, so follow whatever formatting
-  and lint tooling the repo's own docs (README, docs/) describe, running any
-  bazel part of it the same way.
-- Open issues in the repo the work is in. If it has no `agent-written` label,
-  skip that label rather than creating it.
+This exe.dev VM works on REPOS, cloned in $HOME through exe.dev's GitHub
+integration. The repo's own files (its README, CLAUDE.md and any charter or
+loop it has) are the rules for the work; these notes only cover the VM.
+
+- Build, test and measure right here on the VM unless the repo says
+  otherwise. There's no remote build setup for this work.
+- `git` and `gh` go through the integration at github.int.exe.xyz
+  (`GH_HOST` is already set), so pass `-R OWNER/REPO` to `gh`. There's no
+  GitHub token on the VM, and only these repos are reachable.
+- Commit and push often, to the branch the repo's notes say, or its
+  default branch if they say nothing.
+- Codex is configured (`codex exec --sandbox read-only "PROMPT" </dev/null`
+  for a review, `--sandbox workspace-write` for work; without `</dev/null`
+  it waits on stdin). It runs on its own budget, so give it the work it does
+  as well as you.
+- Check a claim (a bug, a fix, a speedup) independently of whoever made it,
+  yourself included, and accept it only with proof: a test or a measurement
+  anyone can rerun.
+- Helpers (subagents, codex) write their details to a file and reply in five
+  lines or fewer, so your context stays small.
+- In replies to Dan, make every PR and issue reference a markdown link to it.

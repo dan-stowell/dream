@@ -13,6 +13,9 @@
 # integration that covers it: it gets no GitHub token, and clones that
 # integration's repos rather than the buildbuddy ones. The VM is tagged with
 # the integration's name, so later runs of plain vm NAME keep it in that mode.
+# It's set up for research: its CLAUDE.md is only vm-CLAUDE-github.md (build on
+# the VM, the repo's own files set the rules), with no helper personas, no
+# coordinator role and no Shelley hook.
 # Set up the integration once with
 #   ssh exe.dev int add github --name OWNER-REPO --repository OWNER/REPO --attach auto:all
 #
@@ -301,11 +304,12 @@ secrets=$bb_api_key
 ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q "$remote_setup") _ $(printf '%q ' "$name" "$git_name" "$git_email" "${repos[@]}")" \
   <<<"$secrets"
 
-# Guidance for every agent on the VM: the shared notes, then a Repos section
-# for the buildbuddy repos or for the integration's repos.
+# Guidance for every agent on the VM: for the buildbuddy repos, the shared
+# notes and their Repos section; for an integration's repos (research VMs),
+# only vm-CLAUDE-github.md, since the repo's own files set the rules there.
 if [[ -n $integration ]]; then
   repo_list=$(printf '`%s`, ' "${repos[@]}")
-  guidance=$(cat "$here/vm-CLAUDE.md"; echo; sed "s|REPOS|${repo_list%, }|" "$here/vm-CLAUDE-github.md")
+  guidance=$(sed "s|REPOS|${repo_list%, }|" "$here/vm-CLAUDE-github.md")
 else
   guidance=$(cat "$here/vm-CLAUDE.md"; echo; cat "$here/vm-CLAUDE-buildbuddy.md")
 fi
@@ -335,6 +339,12 @@ ssh "${ssh_opts[@]}" "$host" 'mkdir -p ~/.claude ~/.config/shelley &&
 # A dispatcher VM also gets vm-dispatcher.md, named for the VM. Having that
 # file is what makes a VM a dispatcher, so it's refreshed on every run once
 # there, with or without --dispatcher.
+# An integration's VM gets none of this: no helper personas, no coordinator
+# role, and no Shelley hook. A rerun removes them if an earlier run put them there.
+if [[ -n $integration ]]; then
+  ssh "${ssh_opts[@]}" "$host" 'rm -f ~/.claude/agents/{adversary,implementer,verifier}.md \
+    ~/.config/vm/coordinator.md ~/.config/vm/coordinator-shelley.md ~/.config/shelley/hooks/system-prompt'
+else
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -C "$here" -cf - vm-agents vm-coordinator.md vm-coordinator-shelley.md vm-dispatcher.md |
   ssh "${ssh_opts[@]}" "$host" "bash -c $(printf %q '
     set -euo pipefail
@@ -362,6 +372,7 @@ case $prompt in
   *) printf '\n\n'; cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/coordinator-shelley.md ;;
 esac
 EOF
+fi
 
 # Shelley's default model is set in exe.dev's own shelley.json, so a drop-in
 # adds -default-model to the unit's ExecStart instead. Shelley is restarted
@@ -449,7 +460,7 @@ if ! tmux has-session -t claude 2>/dev/null; then
     cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/dispatcher.md)"'
     # A dispatcher gets started on its day even without a prompt.
     [ -n "$prompt" ] || prompt='Good morning! Set up for today, then tell me where you think I should focus.'
-  else
+  elif [ -e ~/.config/vm/coordinator.md ]; then
     cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md)"'
   fi
   [ -z "$prompt" ] || cmd+=" $(printf %q "$prompt")"
