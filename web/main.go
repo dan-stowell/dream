@@ -764,8 +764,9 @@ func (s *server) newJobLocked(kind, vm, prompt string, auto bool) (*job, error) 
 		if j.VM == vm && (j.State == "running" || j.State == "queued") {
 			return nil, fmt.Errorf("%s is busy with job %d (%s)", vm, j.ID, j.Kind)
 		}
-		// A new attempt supersedes a login nobody finished.
-		if j.VM == vm && j.State == "login" {
+		// A new attempt of yours supersedes a login nobody finished; an
+		// automatic job (the hourly backup) leaves it waiting for the code.
+		if j.VM == vm && j.State == "login" && !auto {
 			j.State, j.Ended = "failed", time.Now()
 			fmt.Fprintf(&j.ctlLog, "%s\nSuperseded by a newer job.\n", j.agentLog)
 			j.agentLog = ""
