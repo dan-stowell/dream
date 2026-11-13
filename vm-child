@@ -16,6 +16,9 @@
 #   vm-child restart [PROMPT]  end claude's session and start a new one, which
 #                          picks up the current notes and dispatcher prompt.
 #   vm-child login CODE    finish that login.
+#   vm-child run [LIMIT]   on a repo VM, start the repo's ./overnight.sh [LIMIT]
+#                          in tmux session "run" (after a login, as start does).
+#   vm-child stop          on a repo VM, ask that run to stop (touch STOP).
 #   vm-child backup        send transcripts changed since the last backup to CTL.
 set -euo pipefail
 
@@ -145,40 +148,53 @@ cmd_setup() {
   # EXIT, not RETURN: bash runs RETURN traps when a sourced file finishes too.
   trap "rm -rf '$tmp'" EXIT
   (umask 077 && ctl_curl "$ctl/agent/bundle" | tar -xzm -C "$tmp")
-  # config sets name, dispatcher, git_name, git_email, shelley_model and
-  # claude_email; secrets sets gh_token and bb_api_key.
+  # config sets name, kind (classic, dispatcher, hunter or repo), repo,
+  # hunt_target, hunt_priorities, hunt_ticket, git_name, git_email,
+  # shelley_model and claude_email; secrets sets gh_token and bb_api_key
+  # (both empty for a repo VM).
+  local kind='' dispatcher='' repo='' hunt_target='' hunt_priorities='' hunt_ticket=''
   . "$tmp/config"
   . "$tmp/secrets"
+  [ -n "$kind" ] || kind=${dispatcher:+dispatcher}
+  kind=${kind:-classic}
   echo "$claude_email" >~/.config/vm/claude-email
   echo "$name" >~/.config/vm/name
+  echo "$kind" >~/.config/vm/kind
 
-  gh auth login --hostname github.com --git-protocol https --with-token <<<"$gh_token"
-  gh auth setup-git --hostname github.com
   git config --global user.name "$git_name"
   git config --global user.email "$git_email"
 
   # tmux starts login shells, which read ~/.profile.
-  (umask 077 && printf 'export BUILDBUDDY_API_KEY=%q\n' "$bb_api_key" >~/.config/vm/env)
+  if [ "$kind" = repo ]; then
+    # No token: git and gh reach the repo through the exe.dev GitHub integration.
+    echo 'export GH_HOST=github.int.exe.xyz' >~/.config/vm/env
+  else
+    gh auth login --hostname github.com --git-protocol https --with-token <<<"$gh_token"
+    gh auth setup-git --hostname github.com
+    (umask 077 && printf 'export BUILDBUDDY_API_KEY=%q\n' "$bb_api_key" >~/.config/vm/env)
+  fi
   grep -q 'config/vm/env' ~/.profile || echo '[ -f ~/.config/vm/env ] && . ~/.config/vm/env' >>~/.profile
 
-  if ! command -v bb >/dev/null; then
-    echo "Installing bb..."
-    local arch version bbtmp
-    arch=$(uname -m)
-    [ "$arch" = aarch64 ] && arch=arm64
-    version=$(curl -fsSI https://github.com/buildbuddy-io/bazel/releases/latest |
-      sed -n 's|^location: .*/tag/\([^[:space:]]*\).*|\1|ip')
-    bbtmp=$(mktemp -d)
-    curl -fsSL -o "$bbtmp/bb" "https://github.com/buildbuddy-io/bazel/releases/download/$version/bazel-$version-linux-$arch"
-    sudo install -m 0755 "$bbtmp/bb" /usr/local/bin/bb
-    rm -rf "$bbtmp"
+  if [ "$kind" != repo ]; then
+    if ! command -v bb >/dev/null; then
+      echo "Installing bb..."
+      local arch version bbtmp
+      arch=$(uname -m)
+      [ "$arch" = aarch64 ] && arch=arm64
+      version=$(curl -fsSI https://github.com/buildbuddy-io/bazel/releases/latest |
+        sed -n 's|^location: .*/tag/\([^[:space:]]*\).*|\1|ip')
+      bbtmp=$(mktemp -d)
+      curl -fsSL -o "$bbtmp/bb" "https://github.com/buildbuddy-io/bazel/releases/download/$version/bazel-$version-linux-$arch"
+      sudo install -m 0755 "$bbtmp/bb" /usr/local/bin/bb
+      rm -rf "$bbtmp"
+    fi
+    sudo ln -sf bb /usr/local/bin/bazel
+    sudo ln -sf bb /usr/local/bin/bazelisk
   fi
-  sudo ln -sf bb /usr/local/bin/bazel
-  sudo ln -sf bb /usr/local/bin/bazelisk
 
   # Point codex at the exe.dev LLM integration, which carries Dan's ChatGPT
-  # sub, and let it reach RBE from its workspace-write sandbox: bb needs the
-  # network and a writable ~/.cache.
+  # sub, and let it reach the network from its workspace-write sandbox (bb
+  # needs that and a writable ~/.cache).
   mkdir -p ~/.codex ~/.cache
   cat >~/.codex/config.toml <<TOML
 model = "gpt-6-astra"
@@ -193,23 +209,33 @@ network_access = true
 writable_roots = ["$HOME/.cache"]
 TOML
 
-  local repo
-  for repo in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain podman-static; do
-    if [ ! -d ~/"$repo"/.git ]; then
-      echo "Cloning $repo..."
-      git clone --quiet --depth 1 "https://github.com/buildbuddy-io/$repo.git" ~/"$repo"
-      if git -C ~/"$repo" ls-remote --exit-code --heads origin "$name" >/dev/null; then
-        git -C ~/"$repo" remote set-branches --add origin "$name"
-        git -C ~/"$repo" fetch --quiet --depth 1 origin "$name"
-        git -C ~/"$repo" checkout --quiet -b "$name" --track "origin/$name"
-      else
-        git -C ~/"$repo" checkout --quiet -b "$name"
-      fi
-    fi
-  done
-
   local guidance
-  guidance=$(cat "$tmp/vm-CLAUDE.md"; echo; cat "$tmp/vm-CLAUDE-buildbuddy.md")
+  if [ "$kind" = repo ]; then
+    local dir=$HOME/${repo#*/}
+    if [ ! -d "$dir/.git" ]; then
+      echo "Cloning $repo..."
+      git clone --quiet "https://github.int.exe.xyz/$repo.git" "$dir"
+    fi
+    echo "$dir" >~/.config/vm/repo-dir
+    guidance=$(sed "s|REPOS|\`$repo\`|" "$tmp/vm-CLAUDE-github.md")
+  else
+    rm -f ~/.config/vm/repo-dir
+    local r
+    for r in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain podman-static; do
+      if [ ! -d ~/"$r"/.git ]; then
+        echo "Cloning $r..."
+        git clone --quiet --depth 1 "https://github.com/buildbuddy-io/$r.git" ~/"$r"
+        if git -C ~/"$r" ls-remote --exit-code --heads origin "$name" >/dev/null; then
+          git -C ~/"$r" remote set-branches --add origin "$name"
+          git -C ~/"$r" fetch --quiet --depth 1 origin "$name"
+          git -C ~/"$r" checkout --quiet -b "$name" --track "origin/$name"
+        else
+          git -C ~/"$r" checkout --quiet -b "$name"
+        fi
+      fi
+    done
+    guidance=$(cat "$tmp/vm-CLAUDE.md"; echo; cat "$tmp/vm-CLAUDE-buildbuddy.md")
+  fi
 
   # Codex gets the guidance, minus the bullet about asking codex for reviews,
   # after the exe.dev note its AGENTS.md ships with (set aside on the first
@@ -227,21 +253,33 @@ TOML
   rm -f ~/.claude/CLAUDE.md
   tee ~/.claude/CLAUDE.md >~/.config/shelley/AGENTS.md <<<"$guidance"
 
-  # The main claude coordinates the subagents; a dispatcher VM's main claude
-  # is also Dan's home base. Having dispatcher.md is what makes a VM a
-  # dispatcher.
-  cp "$tmp"/vm-agents/*.md ~/.claude/agents/
-  cp "$tmp/vm-coordinator.md" ~/.config/vm/coordinator.md
-  cp "$tmp/vm-coordinator-shelley.md" ~/.config/vm/coordinator-shelley.md
-  if [ -n "$dispatcher" ]; then
-    sed "s|VMNAME|$name|g" "$tmp/vm-dispatcher.md" >~/.config/vm/dispatcher.md
+  rm -f ~/.config/vm/dispatcher.md ~/.config/vm/hunter.md
+  local f
+  if [ "$kind" = repo ]; then
+    # A research VM: no helper personas, no coordinator role, no Shelley hook.
+    for f in "$tmp"/vm-agents/*.md; do rm -f ~/.claude/agents/"${f##*/}"; done
+    rm -f ~/.config/vm/coordinator.md ~/.config/vm/coordinator-shelley.md ~/.config/shelley/hooks/system-prompt
   else
-    rm -f ~/.config/vm/dispatcher.md
-  fi
+    # The main claude coordinates the subagents; a dispatcher is also Dan's
+    # home base, and a hunter runs a bug hunt.
+    cp "$tmp"/vm-agents/*.md ~/.claude/agents/
+    cp "$tmp/vm-coordinator.md" ~/.config/vm/coordinator.md
+    cp "$tmp/vm-coordinator-shelley.md" ~/.config/vm/coordinator-shelley.md
+    case $kind in
+      dispatcher) sed "s|VMNAME|$name|g" "$tmp/vm-dispatcher.md" >~/.config/vm/dispatcher.md ;;
+      hunter)
+        {
+          cat "$tmp/vm-hunter.md"
+          printf '\n## This hunt\n\n- **Target:** %s\n- **Priorities:** %s\n- **Ticket:** %s\n' "$hunt_target" \
+            "${hunt_priorities:-not given: ask Dan in one line, and meanwhile use the order above}" \
+            "${hunt_ticket:-not given: ask Dan where findings go before filing anything}"
+        } >~/.config/vm/hunter.md
+        ;;
+    esac
 
-  # Shelley coordinates too. Its system-prompt hook runs for subagents as
-  # well, so the coordinator notes go only to prompts that aren't a subagent's.
-  cat >~/.config/shelley/hooks/system-prompt <<'EOF'
+    # Shelley coordinates too. Its system-prompt hook runs for subagents as
+    # well, so the coordinator notes go only to prompts that aren't a subagent's.
+    cat >~/.config/shelley/hooks/system-prompt <<'EOF'
 #!/bin/sh
 prompt=$(cat)
 printf '%s' "$prompt"
@@ -250,7 +288,8 @@ case $prompt in
   *) printf '\n\n'; cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/coordinator-shelley.md ;;
 esac
 EOF
-  chmod +x ~/.config/shelley/hooks/system-prompt
+    chmod +x ~/.config/shelley/hooks/system-prompt
+  fi
 
   # Shelley's default model, via a drop-in; restarted only when that changes.
   local exec_start conf dropin=/etc/systemd/system/shelley.service.d/vm.conf
@@ -263,58 +302,78 @@ EOF
       sudo systemctl try-restart shelley.service
     fi
   fi
-  echo "Set up $name${dispatcher:+ as a dispatcher}."
+  echo "Set up $name as a $kind VM${repo:+ on $repo}."
+}
+
+# Remote Control needs a full claude.ai login; setup-token tokens can't do it.
+# Without one, start a login in tmux, print its URL and exit 3.
+ensure_login() {
+  local email url
+  claude auth status >/dev/null 2>&1 && return 0
+  email=$(cat ~/.config/vm/claude-email)
+  # A wide window, so the URL isn't wrapped.
+  tmux kill-session -t vm-login 2>/dev/null || true
+  tmux new-session -d -s vm-login -x 2000 -y 50 claude auth login --claudeai --email "$email"
+  url=
+  for _ in $(seq 30); do
+    if [[ $(tmux capture-pane -p -J -t vm-login) =~ $login_url_re ]]; then
+      url=${BASH_REMATCH[1]}
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "$url" ]; then
+    echo "vm: claude auth login never showed a sign-in URL" >&2
+    exit 1
+  fi
+  echo "vm: claude needs a one-time login."
+  echo "vm: sign in at $url"
+  exit 3
+}
+
+# Skip claude's first-run onboarding and the folder trust prompt for DIR, and
+# set its defaults. Only touched while claude isn't running, since claude
+# rewrites these files.
+prepare_claude() {
+  local dir=$1
+  [ -f ~/.claude.json ] || echo '{}' >~/.claude.json
+  jq --arg dir "$dir" '.hasCompletedOnboarding = true | .projects[$dir].hasTrustDialogAccepted = true' \
+    ~/.claude.json >~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
+  # The VM is the sandbox, so skip permission prompts and their warning.
+  # Fullscreen renderer, Opus, and no attribution line in PR bodies.
+  mkdir -p ~/.claude
+  [ -f ~/.claude/settings.json ] || echo '{}' >~/.claude/settings.json
+  jq '.skipDangerousModePermissionPrompt = true | .tui = "fullscreen" | .model = "opus" | .attribution.pr = ""' \
+    ~/.claude/settings.json >~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
 }
 
 cmd_start() {
-  local prompt=${1:-} name email url
+  local prompt=${1:-} name kind
   name=$(cat ~/.config/vm/name)
-
-  # Remote Control needs a full claude.ai login; setup-token tokens can't do it.
-  if ! claude auth status >/dev/null 2>&1; then
-    email=$(cat ~/.config/vm/claude-email)
-    # A wide window, so the URL isn't wrapped.
-    tmux kill-session -t vm-login 2>/dev/null || true
-    tmux new-session -d -s vm-login -x 2000 -y 50 claude auth login --claudeai --email "$email"
-    url=
-    for _ in $(seq 30); do
-      if [[ $(tmux capture-pane -p -J -t vm-login) =~ $login_url_re ]]; then
-        url=${BASH_REMATCH[1]}
-        break
-      fi
-      sleep 1
-    done
-    if [ -z "$url" ]; then
-      echo "vm: claude auth login never showed a sign-in URL" >&2
-      exit 1
-    fi
-    echo "vm: claude needs a one-time login."
-    echo "vm: sign in at $url"
-    exit 3
-  fi
+  kind=$(cat ~/.config/vm/kind 2>/dev/null || true)
+  # VMs set up before kinds existed: having dispatcher.md made a dispatcher.
+  [ -n "$kind" ] || { [ -e ~/.config/vm/dispatcher.md ] && kind=dispatcher || kind=classic; }
+  ensure_login
 
   if ! tmux has-session -t claude 2>/dev/null; then
-    # Skip claude's first-run onboarding and the folder trust prompt for
-    # $HOME. Only touched while claude isn't running, since claude rewrites it.
-    [ -f ~/.claude.json ] || echo '{}' >~/.claude.json
-    jq --arg home "$HOME" '.hasCompletedOnboarding = true | .projects[$home].hasTrustDialogAccepted = true' \
-      ~/.claude.json >~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json
-    # The VM is the sandbox, so skip permission prompts and their warning.
-    # Fullscreen renderer, Opus, and no attribution line in PR bodies.
-    mkdir -p ~/.claude
-    [ -f ~/.claude/settings.json ] || echo '{}' >~/.claude/settings.json
-    jq '.skipDangerousModePermissionPrompt = true | .tui = "fullscreen" | .model = "opus" | .attribution.pr = ""' \
-      ~/.claude/settings.json >~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
-
+    prepare_claude "$HOME"
+    # In $HOME, not the repo: a repo's own Stop hook (as in overnight runs)
+    # would keep this interactive session from ever finishing a turn.
     tmux new-session -d -s claude -c "$HOME"
     local cmd="claude --dangerously-skip-permissions --remote-control $name"
-    if [ -e ~/.config/vm/dispatcher.md ]; then
-      cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/dispatcher.md)"'
-      # A dispatcher gets started on its day even without a prompt.
-      [ -n "$prompt" ] || prompt='Good morning! Set up for today, then tell me where you think I should focus.'
-    else
-      cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md)"'
-    fi
+    case $kind in
+      dispatcher)
+        cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/dispatcher.md)"'
+        # A dispatcher gets started on its day even without a prompt.
+        [ -n "$prompt" ] || prompt='Good morning! Set up for today, then tell me where you think I should focus.'
+        ;;
+      hunter)
+        cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/hunter.md)"'
+        [ -n "$prompt" ] || prompt='Start the hunt in your notes: read the ticket first if there is one, then begin the first round.'
+        ;;
+      repo) ;;
+      *) cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md)"' ;;
+    esac
     [ -z "$prompt" ] || cmd+=" $(printf %q "$prompt")"
     tmux send-keys -t claude "$cmd" Enter
     echo "Started claude (Remote Control: $name)."
@@ -328,6 +387,45 @@ cmd_start() {
   else
     echo "claude is already running."
   fi
+}
+
+repo_dir() {
+  local dir
+  dir=$(cat ~/.config/vm/repo-dir 2>/dev/null) || { echo "vm: this isn't a repo VM" >&2; exit 1; }
+  printf '%s' "$dir"
+}
+
+# A run is the repo's ./overnight.sh in tmux session "run". A finished run
+# (STOP exists) is cleared away by the next one; a live one has to be stopped.
+cmd_run() {
+  local limit=${1:-} dir
+  dir=$(repo_dir)
+  [ -x "$dir/overnight.sh" ] || { echo "vm: $dir has no executable overnight.sh" >&2; exit 1; }
+  ensure_login
+  if tmux has-session -t run 2>/dev/null; then
+    if [ -e "$dir/STOP" ]; then
+      tmux kill-session -t run
+      echo "Cleared away the finished run."
+    else
+      echo "vm: a run is going; stop it first (it gets a turn to update STATUS.md)" >&2
+      exit 1
+    fi
+  fi
+  prepare_claude "$dir"
+  tmux new-session -d -s run -c "$dir"
+  tmux send-keys -t run "./overnight.sh${limit:+ $(printf %q "$limit")}" Enter
+  echo "Started ./overnight.sh${limit:+ $limit} in $dir (ssh in and tmux attach -t run to watch)."
+}
+
+cmd_stop() {
+  local dir
+  dir=$(repo_dir)
+  if ! tmux has-session -t run 2>/dev/null; then
+    echo "No run is going."
+    return 0
+  fi
+  touch "$dir/STOP"
+  echo "Asked the run to stop: it gets one turn to update STATUS.md, then stays idle until the next run."
 }
 
 cmd_restart() {
@@ -404,7 +502,7 @@ send_batch() {
 cmd=${1:-}
 (($#)) && shift
 case $cmd in
-  install | agent | setup | start | restart | login | backup) "cmd_$cmd" "$@" ;;
+  install | agent | setup | start | restart | login | backup | run | stop) "cmd_$cmd" "$@" ;;
   *)
     sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
     exit 2

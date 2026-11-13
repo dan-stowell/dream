@@ -59,6 +59,12 @@ code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 1
 a { color: var(--accent); }
 .prompt-box { display: none; gap: 8px; }
 .prompt-box.open { display: grid; }
+.kind-box, .run-box { display: none; gap: 8px; font-size: 13.5px; }
+.kind-box.open, .run-box.open { display: grid; }
+.spec-fields { display: grid; gap: 6px; }
+.spec-fields[hidden] { display: none; }
+.kind { flex-wrap: wrap; }
+.kind label { min-width: 200px; }
 .job { padding: 12px 14px; border-top: 1px solid var(--line); }
 .job:first-child { border-top: 0; }
 .job-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -102,11 +108,14 @@ pre.log {
       <button class="primary" type="submit">Start VM</button>
     </div>
     <div class="kind">
-      <label><input type="radio" name="kind" value="classic" checked><span>Classic<small>A coordinator claude for one thread of work.</small></span></label>
-      <label><input type="radio" name="kind" value="dispatcher"><span>Dispatcher<small>Your home base: tracks threads in an issue, suggests focus, reviews PRs every 2h.</small></span></label>
+      <label><input type="radio" name="kind" value="classic" checked><span>Classic<small>A coordinator claude for one thread of work on the buildbuddy repos.</small></span></label>
+      <label><input type="radio" name="kind" value="dispatcher"><span>Dispatcher<small>Your home base: tracks your priorities and threads in ~/threads.md, suggests focus, reviews PRs every 2h.</small></span></label>
+      <label><input type="radio" name="kind" value="hunter"><span>Hunter<small>A bug hunt in rounds: discover, verify on RBE, record in one private ticket.</small></span></label>
+      <label><input type="radio" name="kind" value="repo"><span>Repo<small>Research on one repo through the exe.dev GitHub integration, with runs of its overnight.sh.</small></span></label>
     </div>
-    <textarea id="new-prompt" placeholder="Optional first prompt for claude (a dispatcher starts with “Good morning!” without one)"></textarea>
-    <div class="muted" style="font-size:13px">Creates the VM (or sets up again one this app already manages), clones the repos on a branch named after it, and starts claude with Remote Control.</div>
+    <div id="new-spec"></div>
+    <textarea id="new-prompt" placeholder="Optional first prompt for claude (a dispatcher or hunter gets started without one)"></textarea>
+    <div class="muted" style="font-size:13px">Creates the VM (or sets up again one this app already manages), clones the repos (the buildbuddy ones on a branch named after it, or a repo VM's own), and starts claude with Remote Control.</div>
     <div class="err" id="new-err"></div>
   </form>
 
@@ -125,6 +134,36 @@ pre.log {
 <script>
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// The extra fields a kind needs, shown under its choice.
+function specFields(m = {}) {
+  return `<div class="spec-fields" data-for="hunter" hidden>
+      <input data-f="target" placeholder="target: what to hunt in, and the config that says what's live" value="${esc(m.hunt?.target)}">
+      <input data-f="priorities" placeholder="priorities, most important first (e.g. supply chain, customer data leaks, billing)" value="${esc(m.hunt?.priorities)}">
+      <input data-f="ticket" placeholder="ticket the findings go to (e.g. buildbuddy-io/buildbuddy-internal#8726)" value="${esc(m.hunt?.ticket)}">
+    </div>
+    <div class="spec-fields" data-for="repo" hidden>
+      <input data-f="repo" placeholder="OWNER/REPO, covered by an exe.dev GitHub integration" value="${esc(m.repo)}">
+    </div>`;
+}
+function showSpec(box, kind) {
+  box.querySelectorAll(".spec-fields").forEach(f => f.hidden = f.dataset.for !== kind);
+}
+function readSpec(box, kind) {
+  const spec = {kind};
+  box.querySelectorAll(`.spec-fields[data-for="${kind}"] [data-f]`).forEach(i => spec[i.dataset.f] = i.value.trim());
+  return spec;
+}
+function kindPicker(name, m) {
+  const k = m?.kind || "classic";
+  return `<div class="row">${["classic", "dispatcher", "hunter", "repo"].map(x =>
+    `<label style="display:flex; gap:4px; align-items:center"><input type="radio" name="k-${esc(name)}-${m ? "m" : "a"}" value="${x}" ${x === k ? "checked" : ""} style="width:auto; margin:0">${x}</label>`).join("")}</div>
+    ${specFields(m || {})}`;
+}
+// The picked kind and its fields in a box (the create form, or a VM's kind or adopt box).
+function boxSpec(box) {
+  return readSpec(box, box.querySelector("input[type=radio]:checked").value);
+}
+
 let busy = new Set();           // VMs with a running job
 const openLogs = new Set();     // job ids whose log is expanded
 const openPrompts = new Set();  // VM names with the prompt box open
@@ -143,8 +182,15 @@ async function loadVMs() {
   const el = $("#vms");
   try {
     const {vms, self, ctl_url: ctl, tag} = await api("GET", "/api/vms");
-    const drafts = {};  // keep half-written prompts across refreshes
-    el.querySelectorAll(".vm").forEach(r => drafts[r.dataset.name] = $(".prompt-box textarea", r)?.value || "");
+    const drafts = {}, boxes = {};  // keep half-written prompts and open boxes across refreshes
+    const boxSel = ".kind-box, .adopt-box, .run-box";
+    el.querySelectorAll(".vm").forEach(r => {
+      drafts[r.dataset.name] = $(".prompt-box textarea", r)?.value || "";
+      boxes[r.dataset.name] = {
+        open: [...r.querySelectorAll(boxSel)].map(b => b.classList.contains("open")),
+        vals: [...r.querySelectorAll(`:is(${boxSel}) input`)].map(i => i.type === "radio" ? i.checked : i.value),
+      };
+    });
     if (!vms.length) { el.innerHTML = `<div class="empty muted">No VMs.</div>`; return; }
     el.innerHTML = vms.map(v => {
       const n = v.vm_name, isSelf = n === self, m = v.managed;
@@ -157,7 +203,7 @@ async function loadVMs() {
         <div class="vm-head">
           <span class="dot ${esc(v.status)}"></span>
           <span class="vm-name">${esc(n)}</span>
-          ${m ? `<span class="tag ${m.kind === "dispatcher" ? "disp" : ""}">${esc(m.kind)}</span>` : ""}
+          ${m ? `<span class="tag ${m.kind === "classic" ? "" : "disp"}">${esc(m.kind)}${m.repo ? ": " + esc(m.repo) : ""}</span>` : ""}
           <span class="tag">${esc(v.status)}</span>
           ${agent}
           ${m?.last_backup ? `<span class="tag">backed up ${ago(m.last_backup)}</span>` : ""}
@@ -167,7 +213,9 @@ async function loadVMs() {
             ${m ? `<button data-act="prompt">Prompt</button>
               <button data-act="setup" title="Refresh notes, agents and settings, and start claude if it isn't running">Set up again</button>
               <button data-act="restart" title="Set up again, then end claude's session and start a new one (with the prompt below, if you've typed one)">Restart claude</button>
-              <button data-act="switch">Make ${m.kind === "dispatcher" ? "classic" : "dispatcher"}</button>
+              ${m.kind === "repo" ? `<button data-act="run-open" title="Start the repo's ./overnight.sh">Start run</button>
+                <button data-act="stop" title="Touch STOP: the run gets one turn to update STATUS.md">Stop run</button>` : ""}
+              <button data-act="kind-open">Change kind</button>
               <button data-act="backup">Back up</button>` : ""}
             ${!m && !isSelf ? `<button data-act="adopt">Adopt</button>` : ""}
             ${v.https_url ? `<a href="${esc(v.https_url)}" target="_blank" rel="noopener"><button>Open</button></a>` : ""}
@@ -179,13 +227,28 @@ async function loadVMs() {
           <div class="cmd"><code style="white-space:pre">${esc(install)}</code><button data-copy="${esc(install)}">copy</button></div>
           <span>Or <a href="#" data-act="forget">stop managing it</a>.</span></div>` : ""}
         ${!m && !isSelf ? `<div class="adopt adopt-box muted">Manage ${esc(n)} from here: prompts, backups and delete go through its agent, which you then install from your laptop.
-          <div class="row"><button data-act="adopt-as" data-kind="classic">Adopt as classic</button><button data-act="adopt-as" data-kind="dispatcher">Adopt as dispatcher</button></div></div>` : ""}
+          ${kindPicker(n, null)}
+          <div class="row"><button class="primary" data-act="adopt-as">Adopt</button></div></div>` : ""}
+        ${m ? `<div class="kind-box muted">What ${esc(n)} is for. Changing it sets the VM up again; a running claude keeps its old instructions until you click Restart claude.
+          ${kindPicker(n, m)}
+          <div class="row"><button class="primary" data-act="switch">Set up as this kind</button></div></div>` : ""}
+        ${m?.kind === "repo" ? `<div class="run-box muted">Starts ./overnight.sh in tmux session "run" (watch with <code>ssh -t ${esc(v.ssh_dest || n + ".exe.xyz")} tmux attach -t run</code>).
+          <div class="row"><input data-f="limit" placeholder="optional limit: 1h, 90m or Sat 18:00 (UTC)" style="flex:1; min-width:200px"><button class="primary" data-act="run">Start</button></div></div>` : ""}
         <div class="prompt-box ${openPrompts.has(n) ? "open" : ""}">
           <textarea placeholder="Sent to claude on ${esc(n)} (starts claude if it isn't running)">${esc(drafts[n] || "")}</textarea>
           <div class="row"><button class="primary" data-act="send">Send</button></div>
         </div>
       </div>`;
     }).join("");
+    el.querySelectorAll(".vm").forEach(r => {
+      const b = boxes[r.dataset.name];
+      if (b) {
+        const bs = [...r.querySelectorAll(boxSel)], is = [...r.querySelectorAll(`:is(${boxSel}) input`)];
+        if (bs.length === b.open.length) bs.forEach((x, i) => x.classList.toggle("open", b.open[i]));
+        if (is.length === b.vals.length) is.forEach((x, i) => x.type === "radio" ? x.checked = b.vals[i] : x.value = b.vals[i]);
+      }
+      r.querySelectorAll(".kind-box, .adopt-box").forEach(x => showSpec(x, x.querySelector("input[type=radio]:checked").value));
+    });
     markBusy();
     $("#vms-err").textContent = "";
   } catch (e) {
@@ -202,7 +265,7 @@ function markBusy() {
   });
 }
 
-const kindLabel = {start: "Start", prompt: "Prompt", rm: "Delete", setup: "Set up", backup: "Back up", restart: "Restart"};
+const kindLabel = {start: "Start", prompt: "Prompt", rm: "Delete", setup: "Set up", backup: "Back up", restart: "Restart", run: "Run", stop: "Stop run"};
 function ago(t) {
   const s = Math.round((Date.now() - new Date(t)) / 1000);
   return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s/60)}m ago` : s < 172800 ? `${Math.round(s/3600)}h ago` : `${Math.round(s/86400)}d ago`;
@@ -251,11 +314,16 @@ async function loadJobs() {
   if (focused) $(`.login input[data-job="${focused}"]`, el)?.focus();
 }
 
+$("#new-spec").innerHTML = specFields();
+$("#new").addEventListener("change", e => {
+  if (e.target.name === "kind") showSpec($("#new"), e.target.value);
+});
 $("#new").addEventListener("submit", async e => {
   e.preventDefault();
   $("#new-err").textContent = "";
   try {
-    await api("POST", "/api/vms", {name: $("#new-name").value.trim(), prompt: $("#new-prompt").value, kind: $("input[name=kind]:checked").value});
+    await api("POST", "/api/vms", {name: $("#new-name").value.trim(), prompt: $("#new-prompt").value,
+      ...readSpec($("#new"), $("input[name=kind]:checked").value)});
     $("#new-name").value = ""; $("#new-prompt").value = "";
     loadJobs();
   } catch (err) { $("#new-err").textContent = err.message; }
@@ -288,11 +356,27 @@ $("#vms").addEventListener("click", async e => {
       if (!confirm(`Back up ${name}'s transcripts, then delete ${name}? This can't be undone.`)) return;
       await api("POST", `/api/vms/${encodeURIComponent(name)}/rm`, {});
       loadJobs();
-    } else if (btn.dataset.act === "setup" || btn.dataset.act === "switch") {
-      const kind = btn.dataset.act === "switch" ? (row.dataset.kind === "dispatcher" ? "classic" : "dispatcher") : row.dataset.kind;
-      if (btn.dataset.act === "switch" && !confirm(`Make ${name} a ${kind} VM? This sets it up again; a running claude keeps its old instructions until you click Restart claude.`)) return;
-      await api("POST", `/api/vms/${encodeURIComponent(name)}/setup`, {kind});
+    } else if (btn.dataset.act === "setup") {
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/setup`, {});
+      loadJobs();
+    } else if (btn.dataset.act === "kind-open") {
+      $(".kind-box", row).classList.toggle("open");
+    } else if (btn.dataset.act === "switch") {
+      const spec = boxSpec($(".kind-box", row));
+      if (!confirm(`Set ${name} up as a ${spec.kind} VM?`)) return;
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/setup`, spec);
+      $(".kind-box", row).classList.remove("open");
       loadJobs(); loadVMs();
+    } else if (btn.dataset.act === "run-open") {
+      $(".run-box", row).classList.toggle("open");
+    } else if (btn.dataset.act === "run") {
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/run`, {limit: $(".run-box input", row).value.trim()});
+      $(".run-box", row).classList.remove("open");
+      loadJobs();
+    } else if (btn.dataset.act === "stop") {
+      if (!confirm(`Ask the run on ${name} to stop? It gets one turn to update STATUS.md.`)) return;
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/stop`, {});
+      loadJobs();
     } else if (btn.dataset.act === "restart") {
       const ta = $(".prompt-box textarea", row), prompt = ta.value.trim();
       if (!confirm(`End claude's session on ${name} and start a new one${prompt ? " with your prompt" : ""}? The old conversation stays in its transcript.`)) return;
@@ -305,7 +389,7 @@ $("#vms").addEventListener("click", async e => {
     } else if (btn.dataset.act === "adopt") {
       $(".adopt-box", row).classList.toggle("open");
     } else if (btn.dataset.act === "adopt-as") {
-      await api("POST", `/api/vms/${encodeURIComponent(name)}/adopt`, {kind: btn.dataset.kind});
+      await api("POST", `/api/vms/${encodeURIComponent(name)}/adopt`, boxSpec($(".adopt-box", row)));
       loadVMs();
     } else if (btn.dataset.act === "forget") {
       e.preventDefault();
@@ -314,6 +398,11 @@ $("#vms").addEventListener("click", async e => {
       loadVMs();
     }
   } catch (err) { alert(err.message); }
+});
+
+$("#vms").addEventListener("change", e => {
+  const box = e.target.closest(".kind-box, .adopt-box");
+  if (box && e.target.type === "radio") showSpec(box, e.target.value);
 });
 
 $("#jobs").addEventListener("toggle", e => {

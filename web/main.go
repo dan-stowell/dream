@@ -74,21 +74,79 @@ const (
 
 // The files vm-child setup needs, besides the generated config and secrets.
 var bundleFiles = []string{
-	"vm-CLAUDE.md", "vm-CLAUDE-buildbuddy.md", "vm-coordinator.md",
-	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-agents/*.md",
+	"vm-CLAUDE.md", "vm-CLAUDE-buildbuddy.md", "vm-CLAUDE-github.md", "vm-coordinator.md",
+	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-hunter.md", "vm-agents/*.md",
+}
+
+var (
+	repoRE  = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+	limitRE = regexp.MustCompile(`^[0-9A-Za-z :+.-]{1,40}$`)
+)
+
+// kindSpec is what a VM is for, as a request gives it:
+//   - classic: a coordinator claude on the buildbuddy repos
+//   - dispatcher: Dan's home base (vm-dispatcher.md)
+//   - hunter: a bug hunt (vm-hunter.md) with a target, priorities and a ticket
+//   - repo: research on one OWNER/REPO through the exe.dev GitHub integration,
+//     with none of the buildbuddy setup, and runs of the repo's overnight.sh
+type kindSpec struct {
+	Kind       string `json:"kind"`
+	Repo       string `json:"repo"`
+	Target     string `json:"target"`
+	Priorities string `json:"priorities"`
+	Ticket     string `json:"ticket"`
+}
+
+func (k *kindSpec) check() error {
+	k.Repo, k.Target = strings.TrimSpace(k.Repo), strings.TrimSpace(k.Target)
+	k.Priorities, k.Ticket = strings.TrimSpace(k.Priorities), strings.TrimSpace(k.Ticket)
+	switch k.Kind {
+	case "", "classic":
+		k.Kind = "classic"
+	case "dispatcher":
+	case "hunter":
+		if k.Target == "" {
+			return errors.New("a hunter needs a target")
+		}
+	case "repo":
+		if !repoRE.MatchString(k.Repo) {
+			return errors.New("a repo VM needs OWNER/REPO")
+		}
+	default:
+		return fmt.Errorf("unknown kind %q", k.Kind)
+	}
+	return nil
+}
+
+func (k kindSpec) apply(m *managed) {
+	m.Kind, m.Repo, m.Hunt = k.Kind, "", nil
+	switch k.Kind {
+	case "repo":
+		m.Repo = k.Repo
+	case "hunter":
+		m.Hunt = &hunt{Target: k.Target, Priorities: k.Priorities, Ticket: k.Ticket}
+	}
 }
 
 // managed is a VM this app made or adopted. Only these get jobs, secrets and
 // backups.
 type managed struct {
-	Kind       string    `json:"kind"` // classic or dispatcher
+	Kind       string    `json:"kind"`           // classic, dispatcher, hunter or repo
+	Repo       string    `json:"repo,omitempty"` // a repo VM's OWNER/REPO
+	Hunt       *hunt     `json:"hunt,omitempty"` // a hunter's brief
 	Created    time.Time `json:"created"`
 	LastBackup time.Time `json:"last_backup,omitzero"`
 }
 
+type hunt struct {
+	Target     string `json:"target"`
+	Priorities string `json:"priorities,omitempty"`
+	Ticket     string `json:"ticket,omitempty"`
+}
+
 type job struct {
 	ID       int64     `json:"id"`
-	Kind     string    `json:"kind"` // start, prompt, setup, backup, rm
+	Kind     string    `json:"kind"` // start, prompt, setup, restart, backup, rm, run, stop
 	VM       string    `json:"vm"`
 	State    string    `json:"state"` // queued, running, login, ok, failed
 	Auto     bool      `json:"auto,omitempty"`
@@ -202,6 +260,8 @@ func main() {
 	ui.HandleFunc("POST /api/vms/{name}/setup", s.setupVM)
 	ui.HandleFunc("POST /api/vms/{name}/restart", s.restartVM)
 	ui.HandleFunc("POST /api/vms/{name}/backup", s.backupVM)
+	ui.HandleFunc("POST /api/vms/{name}/run", s.runVM)
+	ui.HandleFunc("POST /api/vms/{name}/stop", s.stopVM)
 	ui.HandleFunc("POST /api/vms/{name}/rm", s.rmVM)
 	ui.HandleFunc("POST /api/vms/{name}/adopt", s.adoptVM)
 	ui.HandleFunc("POST /api/vms/{name}/forget", s.forgetVM)
@@ -379,7 +439,8 @@ func (s *server) listVMs(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) startVM(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name, Prompt, Kind string
+		Name, Prompt string
+		kindSpec
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "%v", err)
@@ -389,10 +450,11 @@ func (s *server) startVM(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "use 5-52 lowercase letters, digits and single hyphens, starting with a letter")
 		return
 	}
-	if req.Kind != "dispatcher" {
-		req.Kind = "classic"
+	if err := req.check(); err != nil {
+		httpError(w, http.StatusBadRequest, "%v", err)
+		return
 	}
-	if s.gh == "" || s.bb == "" {
+	if req.Kind != "repo" && (s.gh == "" || s.bb == "") {
 		httpError(w, http.StatusFailedDependency, "set VM_GITHUB_TOKEN and VM_BUILDBUDDY_API_KEY in ~/.config/vm/secrets and restart vm-web")
 		return
 	}
@@ -401,11 +463,11 @@ func (s *server) startVM(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if m != nil {
 		// Like vm NAME on an existing VM: set it up again and start claude.
-		// Asking for a dispatcher turns a classic VM into one; the reverse
-		// takes an explicit choice in the UI, as with the vm script's marker.
-		if req.Kind == "dispatcher" && m.Kind != "dispatcher" {
+		// Asking for another kind than classic switches the VM to it; going
+		// back to classic takes an explicit choice in the UI.
+		if req.Kind != "classic" {
 			s.mu.Lock()
-			m.Kind = "dispatcher"
+			req.apply(m)
 			s.saveLocked()
 			s.mu.Unlock()
 		}
@@ -417,13 +479,14 @@ func (s *server) startVM(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusConflict, "%v", err)
 		return
 	}
-	go s.create(j, req.Kind)
+	go s.create(j, req.kindSpec)
 	writeJSON(w, map[string]any{"id": j.ID})
 }
 
 // create makes the VM, whose first boot installs vm-child, which then polls
 // for the setup and start steps queued here.
-func (s *server) create(j *job, kind string) {
+func (s *server) create(j *job, spec kindSpec) {
+	kind := spec.Kind
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	vms, err := s.exeVMs(ctx)
@@ -439,7 +502,9 @@ func (s *server) create(j *job, kind string) {
 	}
 	// Record the VM first, so its agent is let in as soon as it boots.
 	s.mu.Lock()
-	s.vms[j.VM] = &managed{Kind: kind, Created: time.Now()}
+	m := &managed{Created: time.Now()}
+	spec.apply(m)
+	s.vms[j.VM] = m
 	err = s.saveLocked()
 	s.mu.Unlock()
 	if err != nil {
@@ -496,18 +561,24 @@ func (s *server) promptVM(w http.ResponseWriter, r *http.Request) {
 }
 
 // setupVM reruns setup, like vm NAME: refreshes notes, agents and settings,
-// and switches between classic and dispatcher if asked. A running claude
-// keeps its old system prompt until it's restarted.
+// and switches the VM to another kind if the request names one. A running
+// claude keeps its old system prompt until it's restarted.
 func (s *server) setupVM(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Kind string }
+	var req kindSpec
 	json.NewDecoder(r.Body).Decode(&req)
 	name := r.PathValue("name")
-	s.mu.Lock()
-	if m := s.vms[name]; m != nil && (req.Kind == "classic" || req.Kind == "dispatcher") && m.Kind != req.Kind {
-		m.Kind = req.Kind
-		s.saveLocked()
+	if req.Kind != "" {
+		if err := req.check(); err != nil {
+			httpError(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		s.mu.Lock()
+		if m := s.vms[name]; m != nil {
+			req.apply(m)
+			s.saveLocked()
+		}
+		s.mu.Unlock()
 	}
-	s.mu.Unlock()
 	s.queue(w, "setup", name, "", false, [][]string{{"setup"}, {"start"}})
 }
 
@@ -521,6 +592,42 @@ func (s *server) restartVM(w http.ResponseWriter, r *http.Request) {
 		restart = append(restart, req.Prompt)
 	}
 	s.queue(w, "restart", r.PathValue("name"), req.Prompt, false, [][]string{{"setup"}, restart})
+}
+
+// runVM starts the repo's ./overnight.sh in its own tmux session, with an
+// optional limit (a duration like 1h, or a clock time). stopVM asks it to stop.
+func (s *server) runVM(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Limit string }
+	json.NewDecoder(r.Body).Decode(&req)
+	req.Limit = strings.TrimSpace(req.Limit)
+	if req.Limit != "" && !limitRE.MatchString(req.Limit) {
+		httpError(w, http.StatusBadRequest, "a limit is a duration like 1h or a time like \"Sat 18:00\"")
+		return
+	}
+	if !s.isRepoVM(w, r.PathValue("name")) {
+		return
+	}
+	step := []string{"run"}
+	if req.Limit != "" {
+		step = append(step, req.Limit)
+	}
+	s.queue(w, "run", r.PathValue("name"), "", false, [][]string{step})
+}
+
+func (s *server) stopVM(w http.ResponseWriter, r *http.Request) {
+	if s.isRepoVM(w, r.PathValue("name")) {
+		s.queue(w, "stop", r.PathValue("name"), "", false, [][]string{{"stop"}})
+	}
+}
+
+func (s *server) isRepoVM(w http.ResponseWriter, name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m := s.vms[name]; m == nil || m.Kind != "repo" {
+		httpError(w, http.StatusBadRequest, "only a repo VM has runs")
+		return false
+	}
+	return true
 }
 
 func (s *server) backupVM(w http.ResponseWriter, r *http.Request) {
@@ -560,10 +667,11 @@ func (s *server) deleteVM(j *job) {
 // script. It gets an agent once someone with SSH access installs vm-child
 // on it (the UI shows how).
 func (s *server) adoptVM(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Kind string }
+	var req kindSpec
 	json.NewDecoder(r.Body).Decode(&req)
-	if req.Kind != "dispatcher" {
-		req.Kind = "classic"
+	if err := req.check(); err != nil {
+		httpError(w, http.StatusBadRequest, "%v", err)
+		return
 	}
 	name := r.PathValue("name")
 	if name == s.self || !nameRE.MatchString(name) {
@@ -573,7 +681,9 @@ func (s *server) adoptVM(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.vms[name] == nil {
-		s.vms[name] = &managed{Kind: req.Kind, Created: time.Now()}
+		m := &managed{Created: time.Now()}
+		req.apply(m)
+		s.vms[name] = m
 		if err := s.saveLocked(); err != nil {
 			httpError(w, http.StatusInternalServerError, "%v", err)
 			return
@@ -614,8 +724,12 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The same job carries on: type the code into the VM's waiting login,
-	// then rerun the start it interrupted.
-	j.steps = [][]string{{"login", strings.TrimSpace(req.Code)}, startStep(j.Prompt)}
+	// then rerun the step it interrupted (the last one: start, restart or run).
+	resume := startStep(j.Prompt)
+	if len(j.steps) > 0 {
+		resume = j.steps[len(j.steps)-1]
+	}
+	j.steps = [][]string{{"login", strings.TrimSpace(req.Code)}, resume}
 	j.State, j.LoginURL, j.Ended, j.queued, j.picked, j.reported = "queued", "", time.Time{}, time.Now(), time.Time{}, false
 	j.ctlLog.WriteString(j.agentLog)
 	j.agentLog = ""
@@ -1036,9 +1150,14 @@ func (s *server) agentReport(w http.ResponseWriter, r *http.Request) {
 func (s *server) agentBundle(w http.ResponseWriter, r *http.Request) {
 	vm := r.Header.Get("X-Exedev-Source-Vm")
 	s.mu.Lock()
-	kind := s.vms[vm].Kind
+	m := *s.vms[vm]
 	s.mu.Unlock()
-	if s.gh == "" || s.bb == "" {
+	kind := m.Kind
+	var h hunt
+	if m.Hunt != nil {
+		h = *m.Hunt
+	}
+	if kind != "repo" && (s.gh == "" || s.bb == "") {
 		httpError(w, http.StatusFailedDependency, "vm-web has no VM_GITHUB_TOKEN or VM_BUILDBUDDY_API_KEY")
 		return
 	}
@@ -1053,11 +1172,18 @@ func (s *server) agentBundle(w http.ResponseWriter, r *http.Request) {
 		}
 		return b.Bytes()
 	}
+	// A repo VM gets no GitHub token or BuildBuddy key: it reaches its repo
+	// through the exe.dev integration.
+	secrets := vars("gh_token", s.gh, "bb_api_key", s.bb)
+	if kind == "repo" {
+		secrets = vars("gh_token", "", "bb_api_key", "")
+	}
 	gen := map[string][]byte{
-		"config": vars("name", vm, "dispatcher", dispatcher,
+		"config": vars("name", vm, "kind", kind, "dispatcher", dispatcher, "repo", m.Repo,
+			"hunt_target", h.Target, "hunt_priorities", h.Priorities, "hunt_ticket", h.Ticket,
 			"git_name", env("VM_GIT_NAME", "Dan Stowell"), "git_email", env("VM_GIT_EMAIL", "dan@buildbuddy.io"),
 			"shelley_model", env("VM_SHELLEY_MODEL", "gpt-6.1-sol"), "claude_email", env("VM_CLAUDE_EMAIL", "dstowell@gmail.com")),
-		"secrets": vars("gh_token", s.gh, "bb_api_key", s.bb),
+		"secrets": secrets,
 	}
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)

@@ -1,8 +1,7 @@
 # vm-web
 
 A web app that runs on an exe.dev VM (here `spawn`). It does what the `vm`
-script does from a laptop: it creates classic and dispatcher VMs that run
-claude with Remote Control, sends them prompts, backs up their transcripts
+script does from a laptop: it creates VMs that run claude with Remote Control, sends them prompts, backs up their transcripts
 to `~/vm-transcripts`, and deletes them.
 
 ## What it can touch
@@ -54,17 +53,31 @@ Then open https://spawn.exe.xyz:8000/.
 installed from your laptop; the UI shows the two commands. After that it
 gets hourly backups, and prompts and delete work from the web UI.
 
+## Kinds of VM
+
+- **Classic**: a coordinator claude on the buildbuddy repos.
+- **Dispatcher**: Dan's home base (`vm-dispatcher.md`). It starts with
+  "Good morning!…" if no prompt is given, and keeps priorities, focus and
+  threads in `~/threads.md` on the VM.
+- **Hunter**: a bug hunt (`vm-hunter.md`), given a target, priorities and
+  the ticket findings go to. It starts the first round if no prompt is given.
+- **Repo**: research on one `OWNER/REPO` through the exe.dev GitHub
+  integration, which replaces `vm --repo`. It gets no GitHub token, no
+  BuildBuddy key, no buildbuddy clones, helper personas or coordinator role;
+  its CLAUDE.md is `vm-CLAUDE-github.md`. **Start run** runs the repo's
+  `./overnight.sh [LIMIT]` in tmux session `run` (LIMIT is `1h`, `90m` or a
+  clock time, UTC), and **Stop run** touches `STOP`. The interactive claude
+  starts in `$HOME`, not in the repo, so the repo's Stop hook doesn't hold it.
+
+**Change kind** switches a VM to another kind and sets it up again.
+
 ## Behavior carried over from `vm`
 
 - The notes, agents and coordinator and dispatcher prompts come from the
   repo on each setup, so edit them here.
-- A dispatcher has `~/.config/vm/dispatcher.md`, named for its VM, and
-  starts with "Good morning!…" if no prompt is given. It tracks focus and
-  threads in `~/threads.md` on the VM. **Make classic** / **Make
-  dispatcher** switches a VM. **Restart claude** sets the VM up again and
-  starts a new session, so changes to these notes take effect.
+- **Restart claude** sets the VM up again and starts a new session, so
+  changes to the notes take effect.
 - The first start on a VM shows a claude.ai sign-in link. Paste the code
   back into the Activity panel.
 - `vm-child` updates itself on each VM when it changes here.
 
-Not carried over: `--repo` mode (VMs on a GitHub integration with no token).
