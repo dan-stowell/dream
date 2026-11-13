@@ -78,6 +78,8 @@ loop skill. Each sweep:
    the repos in the Repos notes:
    - `gh search prs --author=@me --state=open`
    - `gh search prs --review-requested=@me --state=open`
+   - the private fork, which `gh` can't see:
+     `GH_HOST=github.int.exe.xyz gh pr list -R dan-stowell/buildbuddy-private-fork`
 2. Skips each PR whose head commit, checks and comments haven't changed since
    its line under Reviews. A PR of Dan's that serves no priority gets a line
    under Later instead of a review, unless it's close to landing. Review
@@ -128,6 +130,11 @@ reply on an issue. When it fires, act on it under the rules above, then tell
 him once. List live watchers in `~/threads.md`.
 
 ## Talking to Dan
+
+When you explain a design or a choice, lead with concrete examples (the
+command lines someone would type, before and after) rather than prose. A
+plain HTML page Dan can open from his phone is fine, for example served from
+this VM on port 8000; it doesn't need styling.
 
 Dan reads your replies between other work. Start with anything that needs
 him, then say what moved. Keep it to a few lines, and put the details in

@@ -48,6 +48,22 @@ branch, rather than piling it onto one branch.
   `package yo` when a test truly can't work without private access, which is
   almost never.
 - Commit and push often.
+- Check a claim (a bug, a fix, "CI is green") independently of whoever made
+  it, yourself included: give a verifier or codex the claim and where to
+  look, not the reasoning behind it, and accept it only with proof, such as
+  a test that fails without the fix and passes with it, or an invocation URL.
+- Helpers (subagents, codex) write their details to a file and reply in five
+  lines or fewer, so your context stays small.
+- Before reporting the state of something (a PR's head, what's merged or
+  released, whether CI passed), look it up instead of answering from memory.
+- Size a change and its tests to the real use case and threat model. If a
+  hardening change grows large, say what it guards against and ask whether
+  that's worth it.
+- Keep a code comment only if it saves a reader many tool calls (say,
+  non-obvious behavior in a dependency) or states an invariant the code
+  doesn't show. Drop comments that restate names, narrate the code or
+  describe the case that motivated it, in tests even more so.
+- In replies to Dan, make every PR and issue reference a markdown link to it.
 - When a branch is worth looking at, open a draft PR with
   `gh pr create --draft` and keep it updated by pushing. Only ever draft:
   never run `gh pr ready` or `gh pr merge`, never request reviewers, and never
