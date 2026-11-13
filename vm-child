@@ -411,6 +411,14 @@ cmd_run() {
       exit 1
     fi
   fi
+  # Pick up harness changes pushed from elsewhere (LOOP.md, the Stop hook,
+  # overnight.sh) before the run starts; a checkout that can't fast-forward
+  # is left as it is.
+  if git -C "$dir" pull --ff-only --quiet; then
+    echo "Up to date: $(git -C "$dir" log --oneline -1)"
+  else
+    echo "vm: couldn't fast-forward $dir; running it as it is" >&2
+  fi
   prepare_claude "$dir"
   tmux new-session -d -s run -c "$dir"
   tmux send-keys -t run "./overnight.sh${limit:+ $(printf %q "$limit")}" Enter
