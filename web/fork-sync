@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# fork-sync: fast-forward the private fork's master to upstream buildbuddy's master.
+# Plain git, no model tokens; fork-sync.timer runs it hourly. It never forces: if the
+# fork's master has commits upstream doesn't, it writes that to the status file and
+# leaves the fork alone. The status file is what a dispatcher or Dan reads.
+set -uo pipefail
+dir=${FORK_SYNC_DIR:-$HOME/.cache/fork-sync.git}
+status=${FORK_SYNC_STATUS:-$HOME/.config/vm/fork-sync.status}
+up=https://github.com/buildbuddy-io/buildbuddy.git
+fork=https://github.int.exe.xyz/dan-stowell/buildbuddy-private-fork.git
+say() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$1" | tee "$status"; }
+mkdir -p "$(dirname "$status")"
+
+if [ ! -d "$dir" ]; then
+  # Blobless: commits and trees only; a push fetches the few blobs it needs from upstream.
+  git init -q --bare "$dir"
+  git -C "$dir" remote add up "$up"
+  git -C "$dir" remote add fork "$fork"
+  git -C "$dir" config remote.up.promisor true
+  git -C "$dir" config remote.up.partialclonefilter blob:none
+fi
+git -C "$dir" fetch -q --filter=blob:none up +refs/heads/master:refs/remotes/up/master || { say "failed: fetching upstream"; exit 1; }
+git -C "$dir" fetch -q --filter=blob:none fork +refs/heads/master:refs/remotes/fork/master || { say "failed: fetching the fork"; exit 1; }
+u=$(git -C "$dir" rev-parse refs/remotes/up/master) f=$(git -C "$dir" rev-parse refs/remotes/fork/master)
+if [ "$u" = "$f" ]; then
+  say "ok: fork master is upstream master (${u:0:12})"
+elif git -C "$dir" merge-base --is-ancestor "$f" "$u"; then
+  n=$(git -C "$dir" rev-list --count "$f..$u")
+  git -C "$dir" push -q fork "$u:refs/heads/master" || { say "failed: pushing ${u:0:12} to the fork"; exit 1; }
+  say "ok: fast-forwarded fork master by $n commits to ${u:0:12}"
+else
+  n=$(git -C "$dir" rev-list --count "$u..$f")
+  say "diverged: fork master has $n commits upstream doesn't (${f:0:12}); not touched"
+  exit 1
+fi

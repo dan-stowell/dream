@@ -59,6 +59,16 @@ branch, rather than piling it onto one branch.
 - Size a change and its tests to the real use case and threat model. If a
   hardening change grows large, say what it guards against and ask whether
   that's worth it.
+- Make the smallest change that closes the stated gap, in one PR. Extra
+  safety (another check, a separate namespace, a cleanup) is a separate
+  offer in one line, not part of the change. Dan has asked for this many
+  times.
+- In PR bodies, commits and issues, call a change what it does ("server-side
+  auth", not "anonymous auth"), and don't play up risks: state the gap
+  being closed, not the worst case.
+- Codex and other helpers don't read these notes. When one writes code, a
+  commit or a PR body, put the rules that apply in its prompt: the comment
+  rule below, the PR body format, and no session links.
 - Keep a code comment only if it saves a reader many tool calls (say,
   non-obvious behavior in a dependency) or states an invariant the code
   doesn't show. Drop comments that restate names, narrate the code or

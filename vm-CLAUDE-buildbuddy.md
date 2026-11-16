@@ -17,8 +17,11 @@
   it's in shape; PRs already public stay public. `gh` can't see the fork, so
   go through the exe.dev GitHub integration: the remote
   `https://github.int.exe.xyz/dan-stowell/buildbuddy-private-fork`, and
-  `GH_HOST=github.int.exe.xyz gh ...`. Sync its master from upstream before
-  cutting a branch (`git push fork origin/master:refs/heads/master`).
+  `GH_HOST=github.int.exe.xyz gh ...`. spawn fast-forwards its master to
+  upstream every hour, so fetch it rather than syncing it yourself. Links
+  you give Dan are github.com links
+  (`https://github.com/dan-stowell/buildbuddy-private-fork/pull/N`), never
+  github.int.exe.xyz ones.
 - Never name a customer's software, vendors or setup in code, tests,
   comments, commits or PRs, and don't say "customer". Describe the behavior
   guaranteed ("a redirect to an allowlisted private IP is followed"); keep

@@ -71,33 +71,55 @@ Ask in one line, and keep working on everything else while you wait.
 
 ## Background review
 
-Once `~/threads.md` exists, set up a recurring sweep every two hours with the
-loop skill. Each sweep:
+Don't poll GitHub with the model. `pr-watch` (on PATH) polls `gh` every ten
+minutes for free and exits only when there's news Dan could act on:
+- a review requested from him
+- his PR approved, getting changes requested, newly failing or newly green
+  in CI, or with new commits or comments from someone else
+- activity from others on a buildbuddy-io PR or issue that involves him
+- a teammate's PR matching a topic in `~/watch-terms`
+- a private-fork PR that's new, has new commits, or changed CI
 
-1. Lists the open PRs Dan wrote and the open PRs requesting his review, across
-   the repos in the Repos notes:
-   - `gh search prs --author=@me --state=open`
-   - `gh search prs --review-requested=@me --state=open`
-   - the private fork, which `gh` can't see:
-     `GH_HOST=github.int.exe.xyz gh pr list -R dan-stowell/buildbuddy-private-fork`
-2. Skips each PR whose head commit, checks and comments haven't changed since
-   its line under Reviews. A PR of Dan's that serves no priority gets a line
-   under Later instead of a review, unless it's close to landing. Review
-   requests from teammates do get reviewed, because someone is waiting.
-3. Reviews the rest in parallel, in the background. A PR's first review:
-   codex (read-only) and an `adversary` for correctness, each given the PR's
-   diff; Dan's own PRs also get an `adversary` for simplicity. A re-review
-   after new commits: codex only, given just the diff since the last
-   reviewed head. Look at `gh pr checks` and at unaddressed reviewer comments
-   too.
-4. Writes one line per PR under Reviews, with its head commit: ready, "mostly
+Once `~/threads.md` exists, keep exactly one `pr-watch` running as a
+background command, and list it under Watchers. Its exit wakes you with one
+line per item; a session waiting on it spends nothing. Its first run records
+what's already open and reports nothing.
+
+Keep `~/watch-terms` to the topics of Dan's live threads, one per line (for
+example `redis`, `ociregistry`, `rules_img`), and update it as threads come
+and go.
+
+When it wakes you:
+1. Skip anything that changes nothing for Dan: a bot comment, or CI still
+   running.
+2. Review what's left in the background. A PR's first review is codex
+   (read-only) and an `adversary` for correctness, each given the diff; Dan's
+   own PRs also get an `adversary` for simplicity. A re-review after new
+   commits is codex only, on the diff since the last reviewed head. Look at
+   `gh pr checks` and unaddressed reviewer comments too.
+3. Write one line per PR under Reviews, with its head commit: ready, "mostly
    ready except X and Y", or needs work.
-5. Fixes clear problems on Dan's own PRs and pushes the fixes with
-   implementers. A clear problem is CI failing for an obvious reason, or a
-   finding or reviewer request with one obvious fix. Never push to other
-   people's PRs.
-6. Tells Dan what changed since the last sweep, a line per PR, and says
-   nothing if nothing changed.
+4. Fix clear problems on Dan's own PRs and push the fixes with implementers.
+   A clear problem is CI failing for an obvious reason, or a finding or
+   reviewer request with one obvious fix. Never push to other people's PRs.
+5. Start `pr-watch` again.
+
+### Telling Dan
+
+News waits for a lull; it never interrupts. Don't send a message for it:
+- while Dan is talking to you, add one line at the end of your next reply
+- otherwise, add it to the next report you'd send anyway, such as a
+  subagent finishing on a thread
+- if nothing else comes up for an hour, send it as one short message
+
+Lead with what he can move forward (approve, merge, answer someone), then
+the rest, one line each with its link. If nothing's worth his attention,
+say nothing. Never send "nothing changed."
+
+Overnight (22:00 to 07:00 Central) and on weekends, `pr-watch` holds its
+news until the morning, so nothing wakes you while Dan is away. If he says
+he's working off hours, restart it with `--quiet-hours none` (and
+`--weekends`).
 
 ## Spending tokens
 
@@ -139,3 +161,7 @@ this VM on port 8000; it doesn't need styling.
 Dan reads your replies between other work. Start with anything that needs
 him, then say what moved. Keep it to a few lines, and put the details in
 `~/threads.md`.
+
+While anything you started is still running, end the reply with one line
+saying what you're waiting on, e.g. `Waiting on: codex review of #48, CI on
+#14114.` Then Dan never has to ask.

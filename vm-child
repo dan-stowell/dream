@@ -266,7 +266,10 @@ TOML
     cp "$tmp/vm-coordinator.md" ~/.config/vm/coordinator.md
     cp "$tmp/vm-coordinator-shelley.md" ~/.config/vm/coordinator-shelley.md
     case $kind in
-      dispatcher) sed "s|VMNAME|$name|g" "$tmp/vm-dispatcher.md" >~/.config/vm/dispatcher.md ;;
+      dispatcher)
+        sed "s|VMNAME|$name|g" "$tmp/vm-dispatcher.md" >~/.config/vm/dispatcher.md
+        mkdir -p ~/.local/bin && install -m 0755 "$tmp/vm-pr-watch" ~/.local/bin/pr-watch
+        ;;
       hunter)
         {
           cat "$tmp/vm-hunter.md"

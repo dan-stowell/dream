@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""pr-watch: wait, without spending model tokens, until there's GitHub news Dan could act on.
+
+It polls `gh` every few minutes and exits as soon as something new and actionable shows up,
+printing one line per item. A dispatcher runs it as a background command, so the session
+sleeps for free and wakes only when the command exits. Run it again after handling the news.
+
+    pr-watch [--interval 600] [--terms FILE] [--quiet-hours 22-7] [--weekends] [--now]
+
+What counts as news (compared with the state file, so nothing is reported twice):
+  - a review requested from Dan (new, or new commits since he was asked)
+  - Dan's open PR: approved, changes requested, CI newly failing or newly green, new commits,
+    new comments or reviews from someone else
+  - an open PR or issue that involves Dan (mention, comment, assignment) with new activity
+    from someone else
+  - an open PR in the watched repos that has a line of the terms file in its title
+    (topics from ~/threads.md), when it's new or has new commits
+  - a private-fork PR that's new, has new commits, or changed CI
+
+The first run records what's there and reports nothing (pass --now to report it).
+During quiet hours (Dan's time, --tz, default 22-7 America/Chicago) and on weekends it keeps polling and
+remembering, but holds the news until quiet hours end; --weekends lets weekends through.
+Exit status: 0 with news on stdout (or after --once); 1 when --once can't reach GitHub.
+"""
+import argparse, concurrent.futures, datetime, json, os, subprocess, sys, time
+from zoneinfo import ZoneInfo
+
+FORK = "dan-stowell/buildbuddy-private-fork"
+OWNER = "buildbuddy-io"
+REPOS = [f"{OWNER}/buildbuddy", f"{OWNER}/buildbuddy-internal"]
+FIELDS = "number,title,url,repository,author,updatedAt"
+STATE = os.path.expanduser("~/.cache/pr-watch.json")
+
+
+def gh(args, host=None):
+    env = dict(os.environ)
+    if host:
+        env["GH_HOST"] = host
+    r = subprocess.run(["gh"] + args, capture_output=True, text=True, env=env, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(f"gh {' '.join(args[:3])}: {r.stderr.strip()[:200]}")
+    return json.loads(r.stdout or "null")
+
+
+def me():
+    return gh(["api", "user"])["login"]
+
+
+def checks(rollup):
+    states = [(c.get("conclusion") or c.get("state") or c.get("status") or "").upper() for c in rollup or []]
+    if any(s in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE") for s in states):
+        return "failing"
+    if any(s in ("", "PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING") for s in states):
+        return "pending"
+    return "green" if states else "none"
+
+
+def pr_detail(repo, number, host=None):
+    """A PR's head, review decision, checks and conversation. A token that can't read checks
+    in some repo still gets the rest; a PR it can't read at all gives {} (and is still watched
+    by its search result)."""
+    fields = "headRefOid,reviewDecision,comments,reviews,isDraft"
+    try:
+        return gh(["pr", "view", str(number), "-R", repo, "--json", fields + ",statusCheckRollup"], host)
+    except RuntimeError:
+        pass
+    try:
+        return gh(["pr", "view", str(number), "-R", repo, "--json", fields], host)
+    except RuntimeError as e:
+        print(f"pr-watch: {repo}#{number}: {e}", file=sys.stderr)
+        return {}
+
+
+def others(items, login):
+    return sum(1 for x in items or [] if (x.get("author") or {}).get("login") not in (login, None))
+
+
+def snapshot(login, terms):
+    """Everything worth watching right now: {key: {line fields, sig fields}}."""
+    snap = {}
+    pool = concurrent.futures.ThreadPoolExecutor(8)
+    details = {}
+
+    def prefetch(prs):
+        for pr in prs:
+            k = (pr["repository"]["nameWithOwner"], pr["number"])
+            if k not in details:
+                details[k] = pool.submit(pr_detail, *k)
+        return prs
+
+    def detail(repo, number):
+        return details[(repo, number)].result()
+
+    review = prefetch(gh(["search", "prs", "--review-requested=@me", "--state=open", "--json", FIELDS, "--limit", "50"]))
+    mine = prefetch(gh(["search", "prs", "--author=@me", "--state=open", "--json", FIELDS, "--limit", "50"]))
+    # Topics go in a few OR queries (GitHub allows five operators in one), since search is
+    # rate-limited to 30 requests a minute.
+    topical = []
+    for i in range(0, len(terms), 6):
+        group = terms[i:i + 6]
+        query = [x for t in group for x in ("OR", t)][1:]  # gh quotes a term with spaces as a phrase
+        for pr in gh(["search", "prs", *query, "--owner", OWNER, "--state=open", "--json", FIELDS, "--limit", "40"]):
+            if (pr.get("author") or {}).get("login") != login and pr["repository"]["nameWithOwner"] in REPOS:
+                # Search matches bodies too, which is mostly noise; keep title matches.
+                term = next((t for t in group if t.lower() in pr["title"].lower()), None)
+                if term:
+                    topical.append((term, pr))
+    prefetch([pr for _, pr in topical])
+
+    def add(key, kind, repo, number, title, url, sig):
+        snap[key] = {"kind": kind, "repo": repo, "number": number, "title": title, "url": url, "sig": sig}
+
+    for pr in review:
+        repo = pr["repository"]["nameWithOwner"]
+        d = detail(repo, pr["number"])
+        add(f"rr {pr['url']}", "review requested", repo, pr["number"], pr["title"], pr["url"],
+            {"head": d.get("headRefOid") or pr["updatedAt"]})
+
+    for pr in mine:
+        repo = pr["repository"]["nameWithOwner"]
+        d = detail(repo, pr["number"])
+        add(f"mine {pr['url']}", "your PR", repo, pr["number"], pr["title"], pr["url"],
+            {"head": d.get("headRefOid") or pr["updatedAt"], "decision": d.get("reviewDecision") or "",
+             "ci": checks(d["statusCheckRollup"]) if "statusCheckRollup" in d else "unknown",
+             "talk": others(d.get("comments"), login) + others(d.get("reviews"), login), "draft": d.get("isDraft")})
+
+    for kind in ("prs", "issues"):
+        for it in gh(["search", kind, "--involves=@me", "--owner", OWNER, "--state=open", "--json", FIELDS, "--limit", "50"]):
+            repo = it["repository"]["nameWithOwner"]
+            if (it.get("author") or {}).get("login") == login:
+                continue  # Dan's own: covered above (PRs) or he knows (issues)
+            add(f"inv {it['url']}", "involves you", repo, it["number"], it["title"], it["url"],
+                {"updated": it["updatedAt"]})
+
+    for term, pr in topical:
+        key = f"topic {pr['url']}"
+        if key in snap:
+            continue
+        repo = pr["repository"]["nameWithOwner"]
+        d = detail(repo, pr["number"])
+        add(key, f"matches '{term}'", repo, pr["number"], pr["title"], pr["url"],
+            {"head": d.get("headRefOid") or pr["updatedAt"]})
+
+    try:
+        fork = gh(["pr", "list", "-R", FORK, "--state", "open", "--json", "number,title,url,headRefOid,statusCheckRollup"],
+                  "github.int.exe.xyz")
+    except RuntimeError:
+        fork = []
+    for pr in fork:
+        url = f"https://github.com/{FORK}/pull/{pr['number']}"  # links for Dan are github.com links
+        add(f"fork {url}", "private fork", FORK, pr["number"], pr["title"], url,
+            {"head": pr["headRefOid"], "ci": checks(pr.get("statusCheckRollup"))})
+    pool.shutdown()
+    return snap
+
+
+def news(old, new):
+    """What changed that Dan could act on, as lines."""
+    out = []
+    for key, it in new.items():
+        was = old.get(key)
+        s, w = it["sig"], (was or {}).get("sig", {})
+        why = []
+        if was is None:
+            why.append("new")
+        else:
+            if s.get("head") and s.get("head") != w.get("head"):
+                why.append("new commits")
+            if s.get("decision") != w.get("decision") and s.get("decision"):
+                why.append(s["decision"].lower().replace("_", " "))
+            if s.get("ci") != w.get("ci") and s.get("ci") in ("failing", "green"):
+                why.append(f"CI {s['ci']}")
+            if (s.get("talk") or 0) > (w.get("talk") or 0):
+                why.append(f"{s['talk'] - (w.get('talk') or 0)} new comment(s) or review(s)")
+            if s.get("updated") and s.get("updated") != w.get("updated"):
+                why.append("new activity")
+            if w.get("draft") and s.get("draft") is False:
+                why.append("out of draft")
+        if why:
+            out.append(f"{it['kind']}: [{it['repo']}#{it['number']}]({it['url']}) {it['title']} ({', '.join(why)})")
+    return out
+
+
+def quiet(now, hours, weekends):
+    a, b = hours
+    in_hours = (now.hour >= a or now.hour < b) if a > b else (a <= now.hour < b)
+    return in_hours or (not weekends and now.weekday() >= 5)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--interval", type=int, default=600, help="seconds between polls (default 600)")
+    p.add_argument("--terms", default=os.path.expanduser("~/watch-terms"),
+                   help="file of search terms, one per line (default ~/watch-terms)")
+    p.add_argument("--quiet-hours", default="22-7", help="local hours to hold news, START-END, or 'none'")
+    p.add_argument("--tz", default="America/Chicago", help="Dan's time zone (default America/Chicago)")
+    p.add_argument("--state", default=STATE, help=f"state file (default {STATE})")
+    p.add_argument("--weekends", action="store_true", help="deliver news on weekends too")
+    p.add_argument("--now", action="store_true", help="on a first run, report what's there instead of recording it")
+    p.add_argument("--once", action="store_true", help="poll once and exit, with or without news")
+    a = p.parse_args()
+    hours = None if a.quiet_hours == "none" else tuple(int(x) for x in a.quiet_hours.split("-"))
+
+    login = me()
+    # The state file keeps what's been seen and the news held through quiet hours, so a
+    # restart neither repeats nor loses anything.
+    try:
+        saved = json.load(open(a.state))
+        state, held = saved["snap"], saved.get("held", [])
+    except (OSError, ValueError, KeyError, TypeError):
+        state, held = None, []
+    while True:
+        terms = []
+        if os.path.exists(a.terms):
+            terms = [t.strip() for t in open(a.terms) if t.strip() and not t.startswith("#")]
+        try:
+            snap = snapshot(login, terms)
+        except Exception as e:  # a GitHub hiccup: try again next round
+            print(f"pr-watch: {e}", file=sys.stderr)
+            if a.once:
+                return 1
+            time.sleep(a.interval)
+            continue
+        if state is None and not a.now:
+            lines = []
+        else:
+            lines = news(state or {}, snap)
+        state = snap
+        held += [l for l in lines if l not in held]
+        now = datetime.datetime.now(ZoneInfo(a.tz))
+        deliver = held and not (hours and quiet(now, hours, a.weekends))
+        if deliver:
+            print("\n".join(held))
+        os.makedirs(os.path.dirname(a.state) or ".", exist_ok=True)
+        with open(a.state + ".tmp", "w") as f:
+            json.dump({"snap": snap, "held": [] if deliver else held}, f)
+        os.replace(a.state + ".tmp", a.state)
+        if deliver:
+            return 0
+        if a.once:
+            return 0
+        time.sleep(a.interval)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

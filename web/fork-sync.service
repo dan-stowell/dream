@@ -1,0 +1,9 @@
+# Fast-forwards the private fork's master to upstream (fork-sync). Install (user units; spawn lingers):
+#   cp ~/dream/web/fork-sync.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now fork-sync.timer
+[Unit]
+Description=sync buildbuddy-private-fork master from upstream
+
+[Service]
+Type=oneshot
+ExecStart=%h/dream/web/fork-sync
