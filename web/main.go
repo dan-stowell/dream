@@ -950,6 +950,8 @@ var backupPaths = []struct{ from, to string }{
 	{".claude/history.jsonl", "claude/history.jsonl"},
 	{".codex/sessions/", "codex/sessions/"},
 	{".cache/vm-backup/shelley.db", "shelley/shelley.db"},
+	{"threads.md", "threads.md"},
+	{"watch-terms", "watch-terms"},
 }
 
 func backupPath(name string) (string, bool) {

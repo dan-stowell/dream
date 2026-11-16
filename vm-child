@@ -491,7 +491,8 @@ cmd_backup() {
     fi
     batch+=("$path") batch_size=$((batch_size + size))
   done < <(
-    for p in .claude/projects .claude/history.jsonl .codex/sessions; do
+    # threads.md and watch-terms are a dispatcher's memory; they go with the transcripts.
+    for p in .claude/projects .claude/history.jsonl .codex/sessions threads.md watch-terms; do
       [ ! -e "$p" ] || find "$p" -type f "${newer[@]}" -printf '%s %p\0'
     done
     for p in "${files[@]}"; do printf '%s %s\0' "$(stat -c %s "$p")" "$p"; done
