@@ -16,8 +16,14 @@ What counts as news (compared with the state file, so nothing is reported twice)
   - an open PR in the watched repos that has a line of the terms file in its title
     (topics from ~/threads.md), when it's new or has new commits
   - a private-fork PR that's new, has new commits, or changed CI
+  - a Gerrit change of Dan's (gerrit.buildbuddy.io) with a new patch set, new votes or new activity,
+    and a change where Dan is a reviewer that's new or has a new patch set
+  - an open PR in the watched repos, not Dan's, that you could help with: no review yet a day after
+    it was opened ("unreviewed"), or no activity for a week ("languishing"); each is reported once
+    when it gets there, and again only if it changes
 
-The first run records what's there and reports nothing (pass --now to report it).
+The first run records what's there and reports nothing (pass --now to report it); so does the first
+poll that sees a kind of news this version added, so an upgrade doesn't report the backlog.
 During quiet hours (Dan's time, --tz, default 22-7 America/Chicago) and on weekends it keeps polling and
 remembering, but holds the news until quiet hours end; --weekends lets weekends through.
 Exit status: 0 with news on stdout (or after --once); 1 when --once can't reach GitHub.
@@ -30,6 +36,9 @@ OWNER = "buildbuddy-io"
 REPOS = [f"{OWNER}/buildbuddy", f"{OWNER}/buildbuddy-internal"]
 FIELDS = "number,title,url,repository,author,updatedAt"
 STATE = os.path.expanduser("~/.cache/pr-watch.json")
+GERRIT = "gerrit-ssh.buildbuddy.io"
+UNREVIEWED_AFTER = datetime.timedelta(days=1)
+LANGUISHING_AFTER = datetime.timedelta(days=7)
 
 
 def gh(args, host=None):
@@ -75,6 +84,40 @@ def others(items, login):
     return sum(1 for x in items or [] if (x.get("author") or {}).get("login") not in (login, None))
 
 
+def gerrit(query):
+    """Changes matching a Gerrit query, over ssh with the agents' key (~/.ssh/config). [] when Gerrit
+    isn't set up on this VM or can't be reached: None."""
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", GERRIT, "gerrit", "query",
+                            "--format=JSON", "--current-patch-set", "--all-approvals", query],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    out = []
+    for line in r.stdout.splitlines():
+        try:
+            c = json.loads(line)
+        except ValueError:
+            continue
+        if "number" in c:
+            out.append(c)
+    return out
+
+
+def votes(change):
+    ps = change.get("currentPatchSet") or {}
+    return sorted(f"{a.get('type')}{'+' if int(a.get('value', 0)) > 0 else ''}{a.get('value')} by "
+                  f"{(a.get('by') or {}).get('username') or (a.get('by') or {}).get('email')}"
+                  for a in ps.get("approvals") or [])
+
+
+def ago(ts):
+    t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return datetime.datetime.now(datetime.timezone.utc) - t
+
+
 def snapshot(login, terms):
     """Everything worth watching right now: {key: {line fields, sig fields}}."""
     snap = {}
@@ -106,6 +149,13 @@ def snapshot(login, terms):
                 if term:
                     topical.append((term, pr))
     prefetch([pr for _, pr in topical])
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    unreviewed = gh(["search", "prs", "--owner", OWNER, "--state=open", "--draft=false", "--review=none",
+                     "--created", f"<{today - UNREVIEWED_AFTER}", "--sort", "created", "--json", FIELDS + ",createdAt",
+                     "--limit", "40"])
+    languishing = gh(["search", "prs", "--owner", OWNER, "--state=open", "--draft=false",
+                      "--updated", f"<{today - LANGUISHING_AFTER}", "--sort", "updated", "--json", FIELDS,
+                      "--limit", "40"])
 
     def add(key, kind, repo, number, title, url, sig):
         snap[key] = {"kind": kind, "repo": repo, "number": number, "title": title, "url": url, "sig": sig}
@@ -141,27 +191,65 @@ def snapshot(login, terms):
         add(key, f"matches '{term}'", repo, pr["number"], pr["title"], pr["url"],
             {"head": d.get("headRefOid") or pr["updatedAt"]})
 
+    def theirs(pr):
+        who = (pr.get("author") or {}).get("login") or ""
+        return who != login and not who.endswith("[bot]") and who != "app/dependabot" and \
+            pr["repository"]["nameWithOwner"] in REPOS
+
+    # Only PRs still open a month after they went quiet are worth a nudge from here; older ones are
+    # someone's parked work.
+    for pr in unreviewed:
+        if theirs(pr) and ago(pr["createdAt"]) < datetime.timedelta(days=30):
+            add(f"help {pr['url']}", f"unreviewed for {ago(pr['createdAt']).days}d", pr["repository"]["nameWithOwner"],
+                pr["number"], pr["title"], pr["url"], {})
+    for pr in languishing:
+        key = f"help {pr['url']}"
+        if theirs(pr) and key not in snap and ago(pr["updatedAt"]) < datetime.timedelta(days=60):
+            add(key, f"languishing, quiet {ago(pr['updatedAt']).days}d", pr["repository"]["nameWithOwner"],
+                pr["number"], pr["title"], pr["url"], {"stale": "languishing"})
+
+    mine_g, review_g = gerrit("owner:self status:open"), gerrit("reviewer:self -owner:self status:open")
+    for c in mine_g or []:
+        add(f"gerrit {c['url']}", "your Gerrit change", "gerrit", c["number"], c.get("subject", ""), c["url"],
+            {"head": (c.get("currentPatchSet") or {}).get("revision"), "votes": votes(c),
+             "updated": str(c.get("lastUpdated"))})
+    for c in review_g or []:
+        add(f"gerrit-review {c['url']}", "Gerrit review", "gerrit", c["number"], c.get("subject", ""), c["url"],
+            {"head": (c.get("currentPatchSet") or {}).get("revision")})
+
     try:
         fork = gh(["pr", "list", "-R", FORK, "--state", "open", "--json", "number,title,url,headRefOid,statusCheckRollup"],
                   "github.int.exe.xyz")
+        fork_ok = True
     except RuntimeError:
-        fork = []
+        fork, fork_ok = [], False
     for pr in fork:
         url = f"https://github.com/{FORK}/pull/{pr['number']}"  # links for Dan are github.com links
         add(f"fork {url}", "private fork", FORK, pr["number"], pr["title"], url,
             {"head": pr["headRefOid"], "ci": checks(pr.get("statusCheckRollup"))})
     pool.shutdown()
-    return snap
+    # The kinds whose sources answered this poll, even with nothing in them, so an empty kind still
+    # counts as watched and its first item is news.
+    queried = {"rr", "mine", "inv", "topic", "help"} | ({"fork"} if fork_ok else set()) | \
+        ({"gerrit"} if mine_g is not None else set()) | ({"gerrit-review"} if review_g is not None else set())
+    return snap, queried
 
 
-def news(old, new):
-    """What changed that Dan could act on, as lines."""
+def kinds(snap):
+    return {k.split(" ", 1)[0] for k in snap}
+
+
+def news(old, new, seeded):
+    """What changed that Dan could act on, as lines. seeded: the kinds of item (rr, mine, help, gerrit,
+    ...) the old snapshot already watched; a new item of an unseeded kind is taken in quietly."""
     out = []
     for key, it in new.items():
         was = old.get(key)
         s, w = it["sig"], (was or {}).get("sig", {})
         why = []
         if was is None:
+            if key.split(" ", 1)[0] not in seeded:
+                continue  # a kind of news this state file has never recorded: take it in quietly
             why.append("new")
         else:
             if s.get("head") and s.get("head") != w.get("head"):
@@ -174,6 +262,10 @@ def news(old, new):
                 why.append(f"{s['talk'] - (w.get('talk') or 0)} new comment(s) or review(s)")
             if s.get("updated") and s.get("updated") != w.get("updated"):
                 why.append("new activity")
+            if s.get("votes") is not None and s.get("votes") != w.get("votes"):
+                why.append("votes: " + (", ".join(s["votes"]) or "none"))
+            if s.get("stale") and s.get("stale") != w.get("stale"):
+                why.append(s["stale"])
             if w.get("draft") and s.get("draft") is False:
                 why.append("out of draft")
         if why:
@@ -207,14 +299,15 @@ def main():
     try:
         saved = json.load(open(a.state))
         state, held = saved["snap"], saved.get("held", [])
+        seen = set(saved.get("kinds", []))
     except (OSError, ValueError, KeyError, TypeError):
-        state, held = None, []
+        state, held, seen = None, [], set()
     while True:
         terms = []
         if os.path.exists(a.terms):
             terms = [t.strip() for t in open(a.terms) if t.strip() and not t.startswith("#")]
         try:
-            snap = snapshot(login, terms)
+            snap, queried = snapshot(login, terms)
         except Exception as e:  # a GitHub hiccup: try again next round
             print(f"pr-watch: {e}", file=sys.stderr)
             if a.once:
@@ -224,8 +317,10 @@ def main():
         if state is None and not a.now:
             lines = []
         else:
-            lines = news(state or {}, snap)
+            # --now on a first run reports everything there is.
+            lines = news(state or {}, snap, kinds(snap) if state is None else seen | kinds(state))
         state = snap
+        seen |= kinds(snap) | queried
         held += [l for l in lines if l not in held]
         now = datetime.datetime.now(ZoneInfo(a.tz))
         deliver = held and not (hours and quiet(now, hours, a.weekends))
@@ -233,7 +328,7 @@ def main():
             print("\n".join(held))
         os.makedirs(os.path.dirname(a.state) or ".", exist_ok=True)
         with open(a.state + ".tmp", "w") as f:
-            json.dump({"snap": snap, "held": [] if deliver else held}, f)
+            json.dump({"snap": snap, "held": [] if deliver else held, "kinds": sorted(seen)}, f)
         os.replace(a.state + ".tmp", a.state)
         if deliver:
             return 0

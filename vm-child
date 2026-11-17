@@ -142,6 +142,26 @@ report() {
     curl -fsS --max-time 30 -H 'Content-Type: application/json' --data-binary @- "$ctl/agent/jobs/$1" >/dev/null
 }
 
+# Gerrit (gerrit.buildbuddy.io) reviews buildbuddy changes privately before they reach GitHub. One key
+# from spawn for every BuildBuddy VM, Gerrit's host key pinned, a gerrit remote in ~/buildbuddy, and
+# gerrit-push to publish a branch there (website/docs/code-reviews.md in buildbuddy-internal).
+setup_gerrit() {
+  local tmp=$1
+  [ -s "$tmp/gerrit_key" ] || { echo "vm: no Gerrit key in the bundle; skipping Gerrit" >&2; return 0; }
+  mkdir -p ~/.ssh ~/.local/bin && chmod 700 ~/.ssh
+  install -m 0600 "$tmp/gerrit_key" ~/.ssh/gerrit_ed25519
+  install -m 0755 "$tmp/vm-gerrit-push" ~/.local/bin/gerrit-push
+  local known='[gerrit-ssh.buildbuddy.io]:29418 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOq37QZW1lRgFpi6dP5v9aOFAIQg7TjJPZfPkcaAhLJo'
+  grep -qF "$known" ~/.ssh/known_hosts 2>/dev/null || echo "$known" >>~/.ssh/known_hosts
+  if ! grep -q '^Host gerrit-ssh.buildbuddy.io' ~/.ssh/config 2>/dev/null; then
+    printf '\nHost gerrit-ssh.buildbuddy.io\n  User %s\n  Port 29418\n  IdentityFile ~/.ssh/gerrit_ed25519\n  IdentitiesOnly yes\n' \
+      "$git_email" >>~/.ssh/config
+    chmod 600 ~/.ssh/config
+  fi
+  git -C ~/buildbuddy remote get-url gerrit >/dev/null 2>&1 ||
+    git -C ~/buildbuddy remote add gerrit ssh://gerrit-ssh.buildbuddy.io/buildbuddy
+}
+
 cmd_setup() {
   local tmp
   tmp=$(mktemp -d)
@@ -234,6 +254,7 @@ TOML
         fi
       fi
     done
+    setup_gerrit "$tmp"
     guidance=$(cat "$tmp/vm-CLAUDE.md"; echo; cat "$tmp/vm-CLAUDE-buildbuddy.md")
   fi
 

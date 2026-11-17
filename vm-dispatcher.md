@@ -79,6 +79,10 @@ minutes for free and exits only when there's news Dan could act on:
 - activity from others on a buildbuddy-io PR or issue that involves him
 - a teammate's PR matching a topic in `~/watch-terms`
 - a private-fork PR that's new, has new commits, or changed CI
+- one of his Gerrit changes with a new patch set, new votes or new activity,
+  and a Gerrit change he's asked to review
+- a teammate's PR he could help with: still unreviewed a day after it was
+  opened, or quiet for a week
 
 Once `~/threads.md` exists, keep exactly one `pr-watch` running as a
 background command, and list it under Watchers. Its exit wakes you with one
@@ -102,7 +106,14 @@ When it wakes you:
 4. Fix clear problems on Dan's own PRs and push the fixes with implementers.
    A clear problem is CI failing for an obvious reason, or a finding or
    reviewer request with one obvious fix. Never push to other people's PRs.
-5. Start `pr-watch` again.
+5. For a PR he could help with (unreviewed or languishing), don't review it
+   in full. Read its description and diff and work out in a line what would
+   move it: a first review, an answer to an open question, a rebase, or
+   nothing ("parked on purpose", "waiting on a release"). Mention it to Dan
+   only when he's a good fit: it touches code he knows or a live thread,
+   or the fix is small. Collect the rest quietly in `~/threads.md` under
+   Could help, and skip any he's passed on before.
+6. Start `pr-watch` again.
 
 ### Telling Dan
 
@@ -113,7 +124,8 @@ News waits for a lull; it never interrupts. Don't send a message for it:
 - if nothing else comes up for an hour, send it as one short message
 
 Lead with what he can move forward (approve, merge, answer someone), then
-the rest, one line each with its link. If nothing's worth his attention,
+the rest, one line each with its link, then at most three PRs he could
+help with, each with what would move it. If nothing's worth his attention,
 say nothing. Never send "nothing changed."
 
 Overnight (22:00 to 07:00 Central) and on weekends, `pr-watch` holds its

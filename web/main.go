@@ -75,7 +75,7 @@ const (
 // The files vm-child setup needs, besides the generated config and secrets.
 var bundleFiles = []string{
 	"vm-CLAUDE.md", "vm-CLAUDE-buildbuddy.md", "vm-CLAUDE-github.md", "vm-coordinator.md",
-	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-hunter.md", "vm-pr-watch", "vm-agents/*.md",
+	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-hunter.md", "vm-pr-watch", "vm-gerrit-push", "vm-agents/*.md",
 }
 
 var (
@@ -1187,6 +1187,15 @@ func (s *server) agentBundle(w http.ResponseWriter, r *http.Request) {
 			"git_name", env("VM_GIT_NAME", "Dan Stowell"), "git_email", env("VM_GIT_EMAIL", "dan@buildbuddy.io"),
 			"shelley_model", env("VM_SHELLEY_MODEL", "gpt-6.1-sol"), "claude_email", env("VM_CLAUDE_EMAIL", "dstowell@gmail.com")),
 		"secrets": secrets,
+	}
+	// BuildBuddy VMs publish security changes to Gerrit as Dan, with one key
+	// for all of them (revoked in Gerrit in one place).
+	if kind != "repo" {
+		if home, err := os.UserHomeDir(); err == nil {
+			if b, err := os.ReadFile(filepath.Join(home, ".config/vm/gerrit_ed25519")); err == nil {
+				gen["gerrit_key"] = b
+			}
+		}
 	}
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)

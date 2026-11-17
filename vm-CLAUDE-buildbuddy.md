@@ -22,6 +22,20 @@
   you give Dan are github.com links
   (`https://github.com/dan-stowell/buildbuddy-private-fork/pull/N`), never
   github.int.exe.xyz ones.
+- Security-sensitive changes to buildbuddy are made on the private fork like
+  any other work, then reviewed in Gerrit (gerrit.buildbuddy.io), never as a
+  public GitHub PR. Publish to Gerrit only when Dan says the change is ready
+  for teammates: squash it to one commit on a branch off origin/master in
+  ~/buildbuddy, then `gerrit-push -r reviewer@buildbuddy.io` (`-n` first to
+  see what it would push). It adds the Change-Id Gerrit needs and prints the
+  change's link; give Dan that link. To update the change, amend the commit
+  and run `gerrit-push` again: the Change-Id stays, so it becomes a new patch
+  set. Pushes appear as Dan. Never vote in Gerrit (Code-Review or Merge):
+  Dan or the reviewer does. Merging sends it to GitHub as a public PR, so the
+  commit message and description stay as plain as any fix's. Never pull
+  from the gerrit remote. Gerrit covers buildbuddy only; buildbuddy-internal
+  is private already. `ssh gerrit-ssh.buildbuddy.io gerrit query
+  --format=JSON owner:self status:open` lists Dan's open changes.
 - Never name a customer's software, vendors or setup in code, tests,
   comments, commits or PRs, and don't say "customer". Describe the behavior
   guaranteed ("a redirect to an allowlisted private IP is followed"); keep

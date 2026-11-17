@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# gerrit-push: publish the current branch of ~/buildbuddy to Gerrit (gerrit.buildbuddy.io) for review,
+# instead of a public GitHub PR. For security-sensitive changes, once Dan says they're ready for teammates.
+#
+#   gerrit-push [-r reviewer@buildbuddy.io]... [-n]
+#
+# Each commit on the branch since origin/master becomes one Gerrit change (linked, reviewed and merged
+# one by one), so squash first when it's one change. A commit without a Change-Id gets one (Gerrit's own
+# commit-msg hook, applied only here, so GitHub commits don't carry the trailer); a commit that has one
+# keeps it, so pushing an amended commit adds a patch set to the same change. -n shows what would be
+# pushed. Prints the change links Gerrit returns.
+set -euo pipefail
+reviewers=() dry=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -r) reviewers+=("$2"); shift 2 ;;
+    -n) dry=1; shift ;;
+    *) echo "usage: gerrit-push [-r reviewer@buildbuddy.io]... [-n]" >&2; exit 2 ;;
+  esac
+done
+cd "$(git rev-parse --show-toplevel)"
+git remote get-url gerrit >/dev/null 2>&1 || { echo "gerrit-push: no gerrit remote here (run it in ~/buildbuddy)" >&2; exit 1; }
+[ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "gerrit-push: commit or stash your changes first" >&2; exit 1; }
+git fetch --quiet origin master
+base=$(git merge-base HEAD origin/master)
+n=$(git rev-list --count "$base..HEAD")
+[ "$n" -gt 0 ] || { echo "gerrit-push: nothing on this branch since origin/master" >&2; exit 1; }
+
+hook=~/.config/vm/gerrit-hooks/commit-msg
+if [ ! -x "$hook" ]; then
+  mkdir -p "${hook%/*}"
+  scp -q -O gerrit-ssh.buildbuddy.io:hooks/commit-msg "$hook" && chmod +x "$hook"
+fi
+
+# Give every commit missing a Change-Id one, oldest first, keeping the rest of each commit as it is.
+missing=0
+for c in $(git rev-list "$base..HEAD"); do git log -1 --format=%B "$c" | grep -q '^Change-Id: I' || missing=$((missing + 1)); done
+if [ "$missing" -gt 0 ]; then
+  if [ -n "$dry" ]; then
+    echo "would add a Change-Id to $missing commit(s)"
+  else
+    git -c core.hooksPath="${hook%/*}" rebase --quiet --exec \
+      'git log -1 --format=%B | grep -q "^Change-Id: I" || git -c core.hooksPath="$HOME/.config/vm/gerrit-hooks" commit --quiet --amend --no-edit' "$base"
+  fi
+fi
+
+opts=""
+for r in "${reviewers[@]}"; do opts+="${opts:+,}r=$r"; done
+ref="refs/for/master${opts:+%$opts}"
+git log --oneline "$base..HEAD"
+if [ -n "$dry" ]; then echo "would push HEAD to gerrit $ref"; exit 0; fi
+# Gerrit prints the change links ("remote:   https://gerrit.buildbuddy.io/c/...").
+git push gerrit "HEAD:$ref"
