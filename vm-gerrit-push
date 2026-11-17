@@ -2,20 +2,22 @@
 # gerrit-push: publish the current branch of ~/buildbuddy to Gerrit (gerrit.buildbuddy.io) for review,
 # instead of a public GitHub PR. For security-sensitive changes, once Dan says they're ready for teammates.
 #
-#   gerrit-push [-r reviewer@buildbuddy.io]... [-n]
+#   gerrit-push [-r reviewer@buildbuddy.io]... [-w] [-n]
 #
 # Each commit on the branch since origin/master becomes one Gerrit change (linked, reviewed and merged
 # one by one), so squash first when it's one change. A commit without a Change-Id gets one (Gerrit's own
 # commit-msg hook, applied only here, so GitHub commits don't carry the trailer); a commit that has one
 # keeps it, so pushing an amended commit adds a patch set to the same change. -n shows what would be
-# pushed. Prints the change links Gerrit returns.
+# pushed. -w marks it work in progress: visible, but it notifies no one until it's marked ready.
+# Prints the change links Gerrit returns.
 set -euo pipefail
-reviewers=() dry=
+reviewers=() dry= wip=
 while [ $# -gt 0 ]; do
   case $1 in
     -r) reviewers+=("$2"); shift 2 ;;
     -n) dry=1; shift ;;
-    *) echo "usage: gerrit-push [-r reviewer@buildbuddy.io]... [-n]" >&2; exit 2 ;;
+    -w) wip=1; shift ;;
+    *) echo "usage: gerrit-push [-r reviewer@buildbuddy.io]... [-w] [-n]" >&2; exit 2 ;;
   esac
 done
 cd "$(git rev-parse --show-toplevel)"
@@ -46,6 +48,7 @@ fi
 
 opts=""
 for r in "${reviewers[@]}"; do opts+="${opts:+,}r=$r"; done
+[ -n "$wip" ] && opts+="${opts:+,}wip"
 ref="refs/for/master${opts:+%$opts}"
 git log --oneline "$base..HEAD"
 if [ -n "$dry" ]; then echo "would push HEAD to gerrit $ref"; exit 0; fi
