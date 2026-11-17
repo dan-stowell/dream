@@ -1,0 +1,10 @@
+[Unit]
+Description=hourly fork-sync for %i
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

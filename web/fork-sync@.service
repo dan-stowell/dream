@@ -1,0 +1,10 @@
+# fork-sync for one more fork, settings in ~/.config/vm/fork-sync/NAME.env (FORK_SYNC_UP, FORK_SYNC_FORK,
+# FORK_SYNC_MODE, FORK_SYNC_DIR, FORK_SYNC_STATUS). Install: cp fork-sync@.{service,timer} ~/.config/systemd/user/,
+# then systemctl --user daemon-reload && systemctl --user enable --now fork-sync@NAME.timer
+[Unit]
+Description=sync the %i fork's master from upstream
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/vm/fork-sync/%i.env
+ExecStart=%h/dream/web/fork-sync
