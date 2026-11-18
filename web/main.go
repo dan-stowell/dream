@@ -75,7 +75,7 @@ const (
 // The files vm-child setup needs, besides the generated config and secrets.
 var bundleFiles = []string{
 	"vm-CLAUDE.md", "vm-CLAUDE-buildbuddy.md", "vm-CLAUDE-github.md", "vm-coordinator.md",
-	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-hunter.md", "vm-pr-watch", "vm-gerrit-push", "vm-agents/*.md",
+	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-hunter.md", "vm-pr-watch", "vm-gerrit-push", "vm-side-llm", "vm-agents/*.md",
 }
 
 var (
@@ -952,6 +952,8 @@ var backupPaths = []struct{ from, to string }{
 	{".cache/vm-backup/shelley.db", "shelley/shelley.db"},
 	{"threads.md", "threads.md"},
 	{"watch-terms", "watch-terms"},
+	{"notes/", "notes/"},
+	{"side-llm/", "side-llm/"},
 }
 
 func backupPath(name string) (string, bool) {

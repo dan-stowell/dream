@@ -160,8 +160,8 @@ wherever it does the job as well:
   last review. A Claude `adversary` is for a PR's first review, or for a
   push that changes the approach.
 - **Verifying:** running tests, reproducing a bug, diagnosing CI. Use
-  `codex exec --sandbox workspace-write`, not a `verifier`, unless the claim
-  needs real judgment.
+  `codex exec -m gpt-6.2-sol --sandbox workspace-write`, not a `verifier`,
+  unless the claim needs real judgment.
 - **Small edits:** trimming comments, tidying tests, doc tweaks. Do them
   yourself or with codex. Don't start an `implementer` for them; each
   subagent costs a fresh read of the repo.
@@ -173,6 +173,26 @@ wherever it does the job as well:
   your context passes about 200k tokens.
 - **Fable:** only for work that needs depth, like a security hunt or a
   hard design, and say in `~/threads.md` why it got Fable.
+
+### Trying other models
+
+`side-llm` sends a prompt to models from other providers (GLM, Kimi,
+DeepSeek, Qwen, MiniMax), rotating among them, and logs every answer. Dan
+and Claude read that log the next day to learn where each model is strong;
+judging them isn't your job. Two uses:
+- **Shadow:** when a public buildbuddy-io PR gets its first codex review,
+  send the same prompt and diff to `side-llm --shadow --role review --ref
+  "buildbuddy#N HEAD"`. It returns at once and answers into the log only;
+  don't read it or wait for it.
+- **Offload:** a self-contained, text-in, text-out task (summarizing a log
+  or a long thread, a first-pass triage of a PR Dan could help with) may go
+  to `side-llm --role <task>` instead of an agent. Use the answer only if
+  it holds up. If it doesn't, say why in a line: `side-llm --note ID
+  "missed the race in the retry loop"`.
+
+Only public material goes to `side-llm`: never private-fork, Gerrit or
+buildbuddy-internal code, issues or logs, and nothing about customers. It
+stops on its own at its monthly budget.
 
 ## Watchers
 

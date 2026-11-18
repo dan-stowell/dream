@@ -102,5 +102,8 @@ branch, rather than piling it onto one branch.
   that's the default branch) and what to look for, then weigh and address
   what it finds. Prefer it to `codex review`, which can't take custom
   instructions together with `--base`. `-o FILE` saves codex's final message.
-  Codex is already configured (it uses gpt-6-astra), so pass no model or
-  provider flags. Don't ask codex to request reviews itself.
+  Codex is already configured (it uses gpt-6.2-astra), so pass no provider
+  flags. For mechanical work (running tests, reproducing a bug, small edits)
+  add `-m gpt-6.2-sol`, which costs a quarter as much and leaves room under
+  Dan's weekly codex limit; keep the default for reviews and anything that
+  needs judgment. Don't ask codex to request reviews itself.

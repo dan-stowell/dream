@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""side-llm: try other providers' models (GLM, Kimi, DeepSeek, Qwen, MiniMax on
+Fireworks, through the exe.dev LLM integration) on real work, and log every call
+so Dan and Claude can compare them later. The dispatcher doesn't judge the models.
+
+  side-llm [-m MODEL] [--role ROLE] [--ref REF] [--shadow] [PROMPT] [< input]
+  side-llm --note ID TEXT     record what happened to an answer you used
+  side-llm --spent            this month's spend on this VM
+
+PROMPT and stdin are joined (stdin after the prompt, e.g. a diff). Without -m the
+role's least-used trial model is picked, so each role sees all of them over time.
+--shadow returns at once and answers into the log only: for a task that already
+went to codex or an agent, so the two can be compared. Otherwise it prints the
+answer and its log id.
+
+Logs go to ~/side-llm/YYYY-MM.jsonl (backed up with the transcripts). Spending
+stops at $SIDE_LLM_BUDGET dollars a month per VM (default 5), since the gateway
+allowance is $20 a month for every VM together.
+"""
+import argparse, datetime, json, os, sys, time, urllib.request, uuid
+
+BASE = "https://llm.int.exe.xyz/v1/chat/completions"
+CATALOG = "https://exe.dev/llm-gateway-models.json"
+# Dollars per million tokens (input, output, cache read); checked 2026-11-18.
+MODELS = {
+    "fireworks/glm-5p3": (1.4, 4.4, 0.26),
+    "fireworks/kimi-k3p1-pro": (2, 10, 0.2),
+    "fireworks/deepseek-v4p1-flash": (0.3, 1.2, 0.006),
+    "fireworks/qwen3p8-2p4t-a95b": (2, 6, 0.25),
+    "fireworks/minimax-m3": (0.3, 1.2, 0.06),
+}
+LOGDIR = os.path.expanduser("~/side-llm")
+BUDGET = float(os.environ.get("SIDE_LLM_BUDGET", "5"))
+
+
+def logfile(now=None):
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return os.path.join(LOGDIR, now.strftime("%Y-%m") + ".jsonl")
+
+
+def records():
+    try:
+        with open(logfile()) as f:
+            return [json.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        return []
+
+
+def append(rec):
+    os.makedirs(LOGDIR, exist_ok=True)
+    with open(logfile(), "a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def price(model):
+    if model in MODELS:
+        return MODELS[model]
+    try:  # a model outside the trial list: look it up in exe.dev's catalog
+        want = model.split("/", 1)[-1]
+        with urllib.request.urlopen(CATALOG, timeout=30) as r:
+            for p in json.load(r)["providers"]:
+                for m in p["models"]:
+                    if m["id"].rsplit("/", 1)[-1] == want:
+                        c = m.get("cost", {})
+                        return (c.get("input", 0), c.get("output", 0), c.get("cacheRead", 0))
+    except Exception:
+        pass
+    return (0, 0, 0)
+
+
+def spent():
+    return sum(r.get("cost", 0) for r in records() if r.get("kind") == "call")
+
+
+def pick(role):
+    used = {m: 0 for m in MODELS}
+    for r in records():
+        if r.get("kind") == "call" and r.get("role") == role and r.get("model") in used:
+            used[r["model"]] += 1
+    return min(used, key=lambda m: used[m])
+
+
+def call(model, prompt):
+    body = {"model": model, "max_tokens": 16000, "messages": [{"role": "user", "content": prompt}]}
+    req = urllib.request.Request(BASE, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=900) as r:
+        return json.load(r)
+
+
+def run(a, prompt):
+    rec = {"kind": "call", "id": uuid.uuid4().hex[:8], "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+           "vm": os.uname().nodename, "role": a.role, "ref": a.ref, "shadow": a.shadow, "model": a.model, "prompt": prompt}
+    t0 = time.time()
+    try:
+        d = call(a.model, prompt)
+        msg = d["choices"][0]["message"]
+        u = d.get("usage", {})
+        cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+        pin, pout, pcache = price(a.model)
+        rec.update(answer=msg.get("content") or "", reasoning_chars=len(msg.get("reasoning_content") or ""),
+                   finish=d["choices"][0].get("finish_reason"), usage=u,
+                   cost=round(((u.get("prompt_tokens", 0) - cached) * pin + cached * pcache + u.get("completion_tokens", 0) * pout) / 1e6, 5))
+    except Exception as e:
+        rec.update(error=f"{type(e).__name__}: {e}"[:2000], cost=0)
+    rec["seconds"] = round(time.time() - t0, 1)
+    append(rec)
+    return rec
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("-m", "--model")
+    p.add_argument("--role", default="other", help="review, triage, summarize, explain, ... (free text, but reuse names)")
+    p.add_argument("--ref", default="", help="what it was about, e.g. 'buildbuddy#14172 abc1234'")
+    p.add_argument("--shadow", action="store_true")
+    p.add_argument("--note", metavar="ID")
+    p.add_argument("--spent", action="store_true")
+    p.add_argument("prompt", nargs="*")
+    a = p.parse_args()
+
+    if a.spent:
+        print(f"${spent():.2f} of ${BUDGET:.2f} this month")
+        return
+    if a.note:
+        append({"kind": "note", "id": a.note, "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "note": " ".join(a.prompt)})
+        return
+    prompt = " ".join(a.prompt)
+    if not sys.stdin.isatty():
+        data = sys.stdin.read().strip()
+        prompt = f"{prompt}\n\n{data}" if prompt and data else (prompt or data)
+    if not prompt.strip():
+        sys.exit("side-llm: no prompt")
+    if spent() >= BUDGET:
+        sys.exit(f"side-llm: this month's ${BUDGET:.2f} is spent; skip it")
+    a.model = a.model or pick(a.role)
+
+    if a.shadow:
+        if os.fork():
+            print(f"side-llm: {a.model} answering into the log")
+            return
+        os.setsid()
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+        run(a, prompt)
+        return
+    rec = run(a, prompt)
+    if "error" in rec:
+        sys.exit(f"side-llm: {a.model}: {rec['error']}")
+    print(rec["answer"])
+    print(f"\n[side-llm {rec['id']}: {a.model}, {rec['seconds']}s, ${rec['cost']:.4f}]", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
