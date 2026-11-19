@@ -3,11 +3,12 @@
 Fireworks, through the exe.dev LLM integration) on real work, and log every call
 so Dan and Claude can compare them later. The dispatcher doesn't judge the models.
 
-  side-llm [-m MODEL] [--role ROLE] [--ref REF] [--shadow] [PROMPT] [< input]
+  side-llm [-m MODEL] [--role ROLE] [--ref REF] [--effort E] [--shadow] PROMPT... [-] [< input]
   side-llm --note ID TEXT     record what happened to an answer you used
   side-llm --spent            this month's spend on this VM
 
-PROMPT and stdin are joined (stdin after the prompt, e.g. a diff). Without -m the
+Stdin is read only when an argument is `-` (stdin goes there, e.g. a diff) or
+there is no PROMPT; otherwise it's ignored, so a call never waits on it. Without -m the
 role's least-used trial model is picked, so each role sees all of them over time.
 --shadow returns at once and answers into the log only: for a task that already
 went to codex or an agent, so the two can be compared. Otherwise it prints the
@@ -80,8 +81,8 @@ def pick(role):
     return min(used, key=lambda m: used[m])
 
 
-def call(model, prompt):
-    body = {"model": model, "max_tokens": 16000, "messages": [{"role": "user", "content": prompt}]}
+def call(model, prompt, effort):
+    body = {"model": model, "max_tokens": 48000, "reasoning_effort": effort, "messages": [{"role": "user", "content": prompt}]}
     req = urllib.request.Request(BASE, json.dumps(body).encode(), {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=900) as r:
         return json.load(r)
@@ -89,10 +90,10 @@ def call(model, prompt):
 
 def run(a, prompt):
     rec = {"kind": "call", "id": uuid.uuid4().hex[:8], "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-           "vm": os.uname().nodename, "role": a.role, "ref": a.ref, "shadow": a.shadow, "model": a.model, "prompt": prompt}
+           "vm": os.uname().nodename, "role": a.role, "ref": a.ref, "shadow": a.shadow, "model": a.model, "effort": a.effort, "prompt": prompt}
     t0 = time.time()
     try:
-        d = call(a.model, prompt)
+        d = call(a.model, prompt, a.effort)
         msg = d["choices"][0]["message"]
         u = d.get("usage", {})
         cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
@@ -112,6 +113,7 @@ def main():
     p.add_argument("-m", "--model")
     p.add_argument("--role", default="other", help="review, triage, summarize, explain, ... (free text, but reuse names)")
     p.add_argument("--ref", default="", help="what it was about, e.g. 'buildbuddy#14172 abc1234'")
+    p.add_argument("--effort", default="medium", choices=["low", "medium", "high"], help="reasoning effort (default medium)")
     p.add_argument("--shadow", action="store_true")
     p.add_argument("--note", metavar="ID")
     p.add_argument("--spent", action="store_true")
@@ -124,10 +126,11 @@ def main():
     if a.note:
         append({"kind": "note", "id": a.note, "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "note": " ".join(a.prompt)})
         return
-    prompt = " ".join(a.prompt)
-    if not sys.stdin.isatty():
+    words = a.prompt
+    if not words or "-" in words:
         data = sys.stdin.read().strip()
-        prompt = f"{prompt}\n\n{data}" if prompt and data else (prompt or data)
+        words = [data if w == "-" else w for w in words] if words else [data]
+    prompt = " ".join(words)
     if not prompt.strip():
         sys.exit("side-llm: no prompt")
     if spent() >= BUDGET:
