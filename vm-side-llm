@@ -8,14 +8,16 @@ so Dan and Claude can compare them later. The dispatcher doesn't judge the model
   side-llm --spent            this month's spend on this VM
 
 Stdin is read only when an argument is `-` (stdin goes there, e.g. a diff) or
-there is no PROMPT; otherwise it's ignored, so a call never waits on it. Without -m the
+there is no PROMPT; otherwise it's ignored, so a call never waits on it.
+Reviews go to GLM 5.3, the model that did best on the first trial; other roles
+rotate through the trial models (least used first). -m names a model. Without -m the
 role's least-used trial model is picked, so each role sees all of them over time.
 --shadow returns at once and answers into the log only: for a task that already
 went to codex or an agent, so the two can be compared. Otherwise it prints the
 answer and its log id.
 
 Logs go to ~/side-llm/YYYY-MM.jsonl (backed up with the transcripts). Spending
-stops at $SIDE_LLM_BUDGET dollars a month per VM (default 5), since the gateway
+stops at $SIDE_LLM_BUDGET dollars a month per VM (default 10), since the gateway
 allowance is $20 a month for every VM together.
 """
 import argparse, datetime, json, os, sys, time, urllib.request, uuid
@@ -30,8 +32,11 @@ MODELS = {
     "fireworks/qwen3p8-2p4t-a95b": (2, 6, 0.25),
     "fireworks/minimax-m3": (0.3, 1.2, 0.06),
 }
+# Roles with a model picked from the trials so far; other roles rotate. (2026-11-19: GLM 5.3 found
+# 3 of 4 reviewer findings on a real PR for 3 cents; the other four found 1 or none.)
+PREFERRED = {"review": "fireworks/glm-5p3"}
 LOGDIR = os.path.expanduser("~/side-llm")
-BUDGET = float(os.environ.get("SIDE_LLM_BUDGET", "5"))
+BUDGET = float(os.environ.get("SIDE_LLM_BUDGET", "10"))
 
 
 def logfile(now=None):
@@ -135,7 +140,7 @@ def main():
         sys.exit("side-llm: no prompt")
     if spent() >= BUDGET:
         sys.exit(f"side-llm: this month's ${BUDGET:.2f} is spent; skip it")
-    a.model = a.model or pick(a.role)
+    a.model = a.model or PREFERRED.get(a.role) or pick(a.role)
 
     if a.shadow:
         if os.fork():

@@ -291,6 +291,8 @@ TOML
         sed "s|VMNAME|$name|g" "$tmp/vm-dispatcher.md" >~/.config/vm/dispatcher.md
         mkdir -p ~/.local/bin && install -m 0755 "$tmp/vm-pr-watch" ~/.local/bin/pr-watch
         install -m 0755 "$tmp/vm-side-llm" ~/.local/bin/side-llm
+        cp "$tmp/vm-reviewers.md" ~/.config/vm/reviewers.md
+        cp "$tmp/vm-watch-paths" ~/.config/vm/watch-paths
         ;;
       hunter)
         {

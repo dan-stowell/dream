@@ -125,9 +125,13 @@ minutes for free and exits only when there's news Dan could act on:
   in CI, or with new commits or comments from someone else
 - activity from others on a buildbuddy-io PR or issue that involves him
 - a teammate's PR matching a topic in `~/watch-terms`
-- a private-fork PR that's new, has new commits, or changed CI
-- one of his Gerrit changes with a new patch set, new votes or new activity,
-  and a Gerrit change he's asked to review
+- a teammate's new PR that changes files in Dan's areas
+  (`~/.config/vm/watch-paths`): Firecracker, the OCI runtime and fetcher,
+  container images and the rest of the executor side, the CLI, our own Bazel
+  config, release and deploy, auth and API keys, usage and billing
+- a private-fork PR whose CI newly fails or turns green
+- one of his Gerrit changes with a patch set, vote or comment from someone
+  else, and a Gerrit change he's asked to review
 - a teammate's PR he could help with: still unreviewed a day after it was
   opened, or quiet for a week
 
@@ -161,7 +165,23 @@ When it wakes you:
    only when he's a good fit: it touches code he knows or a live thread,
    or the fix is small. Collect the rest quietly in `~/threads.md` under
    Could help, and skip any he's passed on before.
-6. Start `pr-watch` again.
+6. For a PR in his areas, Dan wants to see it even when he's not involved.
+   Don't review it. Put one line in his next sit rep, under the goal it
+   touches or under "In your areas": what it does, who wrote it, its size,
+   and whether it has a reviewer. Anything touching supply-chain attacks,
+   customer data or billing correctness goes first. If it's small, obvious
+   and unreviewed, say he could move it.
+7. Start `pr-watch` again.
+
+### Choosing reviewers
+
+GitHub's suggested reviewers miss who really knows a subsystem. When a
+change needs reviewers, or Dan asks who could review something, read
+`~/.config/vm/reviewers.md`, the map of areas to people, and check each
+candidate's open review requests (the query is at its end). Prefer someone
+who knows the area and has room; Brandon and Vadim are usually overloaded,
+so pick them only when nobody else knows the code. Suggest names to Dan
+with a few words on why. Assign them only when he says to.
 
 ### Telling Dan
 
@@ -207,12 +227,16 @@ wherever it does the job as well:
 
 ### Trying other models
 
-`side-llm` sends a prompt to models from other providers (GLM, Kimi,
-DeepSeek, Qwen, MiniMax), rotating among them, and logs every answer. Dan
-and Claude read that log the next day to learn where each model is strong;
-judging them isn't your job. Two uses:
-- **Shadow:** when a public buildbuddy-io PR gets its first codex review,
-  send the same prompt and diff to `side-llm --shadow --role review --ref
+`side-llm` sends a prompt to models from other providers and logs every
+answer. It never replaces a review: codex and the `adversary` agents still
+do every real one. Its shadow reviews go to GLM 5.3 (Fireworks), which did
+best on the first trial and costs a few cents each; other tasks rotate among
+GLM, Kimi, DeepSeek, Qwen and MiniMax. Dan and Claude read the log the next day to see what GLM finds
+that codex and the adversaries don't; judging it isn't your job. Two uses:
+- **Shadow:** every time a public buildbuddy-io PR gets a codex review,
+  first or re-review, send the same prompt and diff. Also shadow-review
+  public PRs you'd otherwise only skim: ones in Dan's areas and ones he
+  could help with (a correctness review prompt plus the diff). Send them to `side-llm --shadow --role review --ref
   "buildbuddy#N HEAD" "$PROMPT" - < pr.diff` (stdin is read only where `-`
   is). It returns at once and answers into the log only;
   don't read it or wait for it.

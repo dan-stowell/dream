@@ -5,7 +5,7 @@ It polls `gh` every few minutes and exits as soon as something new and actionabl
 printing one line per item. A dispatcher runs it as a background command, so the session
 sleeps for free and wakes only when the command exits. Run it again after handling the news.
 
-    pr-watch [--interval 600] [--terms FILE] [--quiet-hours 22-7] [--weekends] [--now]
+    pr-watch [--interval 600] [--terms FILE] [--paths FILE] [--quiet-hours 22-7] [--weekends] [--now]
 
 What counts as news (compared with the state file, so nothing is reported twice):
   - a review requested from Dan (new, or new commits since he was asked)
@@ -15,6 +15,8 @@ What counts as news (compared with the state file, so nothing is reported twice)
     from someone else
   - an open PR in the watched repos that has a line of the terms file in its title
     (topics from ~/threads.md), when it's new or has new commits
+  - a teammate's PR opened in the last few days that changes files under Dan's areas (the paths
+    file: `repo:prefix` lines, grouped under `# Area` comments), reported once
   - a private-fork PR whose CI newly fails or turns green (only agents open and push those)
   - a Gerrit change of Dan's (gerrit.buildbuddy.io) with a patch set, vote or comment from someone
     else, and a change where Dan is a reviewer that's new or has a new patch set
@@ -40,6 +42,7 @@ STATE = os.path.expanduser("~/.cache/pr-watch.json")
 GERRIT = "gerrit-ssh.buildbuddy.io"
 UNREVIEWED_AFTER = datetime.timedelta(days=1)
 LANGUISHING_AFTER = datetime.timedelta(days=7)
+AREA_WINDOW = datetime.timedelta(days=3)  # how far back to look for new PRs in Dan's areas
 
 
 def gh(args, host=None):
@@ -147,7 +150,31 @@ def ago(ts):
     return datetime.datetime.now(datetime.timezone.utc) - t
 
 
-def snapshot(login, terms, prev=None):
+def load_paths(path):
+    """[(repo, prefix, area)] from a paths file; the area is the latest '# Area' comment."""
+    out, area = [], ""
+    try:
+        lines = open(path).read().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        line = line.strip()
+        if line.startswith("#"):
+            area = line.lstrip("# ").strip()
+        elif ":" in line:
+            repo, prefix = line.split(":", 1)
+            out.append((f"{OWNER}/{repo.strip()}", prefix.strip(), area or prefix.strip()))
+    return out
+
+
+def pr_files(repo, number):
+    try:
+        return [f["path"] for f in gh(["pr", "view", str(number), "-R", repo, "--json", "files"])["files"]]
+    except (RuntimeError, KeyError, TypeError):
+        return None
+
+
+def snapshot(login, terms, prev=None, paths=()):
     """Everything worth watching right now: {key: {line fields, sig fields}}. prev, the last
     snapshot, saves re-reading conversations that haven't changed."""
     prev = prev or {}
@@ -181,6 +208,8 @@ def snapshot(login, terms, prev=None):
                     topical.append((term, pr))
     prefetch([pr for _, pr in topical])
     today = datetime.datetime.now(datetime.timezone.utc).date()
+    recent = gh(["search", "prs", "--owner", OWNER, "--state=open", "--draft=false",
+                 "--created", f">={today - AREA_WINDOW}", "--json", FIELDS, "--limit", "100"]) if paths else []
     unreviewed = gh(["search", "prs", "--owner", OWNER, "--state=open", "--draft=false", "--review=none",
                      "--created", f"<{today - UNREVIEWED_AFTER}", "--sort", "created", "--json", FIELDS + ",createdAt",
                      "--limit", "40"])
@@ -237,6 +266,22 @@ def snapshot(login, terms, prev=None):
         return who != login and not who.endswith("[bot]") and who != "app/dependabot" and \
             pr["repository"]["nameWithOwner"] in REPOS
 
+    # A PR's files are read once, when it first shows up; after that its areas come from prev.
+    for pr in recent:
+        if not theirs(pr):
+            continue
+        repo, key = pr["repository"]["nameWithOwner"], f"area {pr['url']}"
+        old = (prev.get(key) or {}).get("sig")
+        if old is not None:
+            areas = old.get("areas", [])
+        else:
+            files = pr_files(repo, pr["number"])
+            if files is None:
+                continue  # try again next poll
+            areas = sorted({a for r_, prefix, a in paths if r_ == repo for f in files if f.startswith(prefix)})
+        add(key, "in your areas (" + ", ".join(areas) + ")", repo, pr["number"], pr["title"], pr["url"],
+            {"areas": areas})
+
     # Only PRs still open a month after they went quiet are worth a nudge from here; older ones are
     # someone's parked work.
     for pr in unreviewed:
@@ -271,7 +316,7 @@ def snapshot(login, terms, prev=None):
     pool.shutdown()
     # The kinds whose sources answered this poll, even with nothing in them, so an empty kind still
     # counts as watched and its first item is news.
-    queried = {"rr", "mine", "inv", "topic", "help"} | ({"fork"} if fork_ok else set()) | \
+    queried = {"rr", "mine", "inv", "topic", "help"} | ({"area"} if paths else set()) | ({"fork"} if fork_ok else set()) | \
         ({"gerrit"} if mine_g is not None else set()) | ({"gerrit-review"} if review_g is not None else set())
     return snap, queried
 
@@ -293,6 +338,8 @@ def news(old, new, seeded):
                 continue  # a kind of news this state file has never recorded: take it in quietly
             if key.startswith(("fork ", "gerrit ")):
                 continue  # agents open these as Dan
+            if key.startswith("area ") and not it["sig"].get("areas"):
+                continue  # read, but outside Dan's areas
             why.append("new")
         else:
             if s.get("head") and s.get("head") != w.get("head"):
@@ -335,6 +382,8 @@ def main():
     p.add_argument("--interval", type=int, default=600, help="seconds between polls (default 600)")
     p.add_argument("--terms", default=os.path.expanduser("~/watch-terms"),
                    help="file of search terms, one per line (default ~/watch-terms)")
+    p.add_argument("--paths", default=os.path.expanduser("~/.config/vm/watch-paths"),
+                   help="file of repo:path prefixes for Dan's areas (default ~/.config/vm/watch-paths)")
     p.add_argument("--quiet-hours", default="22-7", help="local hours to hold news, START-END, or 'none'")
     p.add_argument("--tz", default="America/Chicago", help="Dan's time zone (default America/Chicago)")
     p.add_argument("--state", default=STATE, help=f"state file (default {STATE})")
@@ -358,7 +407,7 @@ def main():
         if os.path.exists(a.terms):
             terms = [t.strip() for t in open(a.terms) if t.strip() and not t.startswith("#")]
         try:
-            snap, queried = snapshot(login, terms, state)
+            snap, queried = snapshot(login, terms, state, load_paths(a.paths))
         except Exception as e:  # a GitHub hiccup: try again next round
             print(f"pr-watch: {e}", file=sys.stderr)
             if a.once:
