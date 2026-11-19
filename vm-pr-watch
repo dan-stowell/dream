@@ -9,19 +9,20 @@ sleeps for free and wakes only when the command exits. Run it again after handli
 
 What counts as news (compared with the state file, so nothing is reported twice):
   - a review requested from Dan (new, or new commits since he was asked)
-  - Dan's open PR: approved, changes requested, CI newly failing or newly green, new commits,
-    new comments or reviews from someone else
+  - Dan's open PR: approved, changes requested, CI newly failing or newly green, new commits
+    or new comments or reviews from someone else
   - an open PR or issue that involves Dan (mention, comment, assignment) with new activity
     from someone else
   - an open PR in the watched repos that has a line of the terms file in its title
     (topics from ~/threads.md), when it's new or has new commits
-  - a private-fork PR that's new, has new commits, or changed CI
-  - a Gerrit change of Dan's (gerrit.buildbuddy.io) with a new patch set, new votes or new activity,
-    and a change where Dan is a reviewer that's new or has a new patch set
+  - a private-fork PR whose CI newly fails or turns green (only agents open and push those)
+  - a Gerrit change of Dan's (gerrit.buildbuddy.io) with a patch set, vote or comment from someone
+    else, and a change where Dan is a reviewer that's new or has a new patch set
   - an open PR in the watched repos, not Dan's, that you could help with: no review yet a day after
     it was opened ("unreviewed"), or no activity for a week ("languishing"); each is reported once
     when it gets there, and again only if it changes
 
+Whatever Dan does himself (or an agent does as Dan: pushes, approvals, votes, comments) isn't news.
 The first run records what's there and reports nothing (pass --now to report it); so does the first
 poll that sees a kind of news this version added, so an upgrade doesn't report the backlog.
 During quiet hours (Dan's time, --tz, default 22-7 America/Chicago) and on weekends it keeps polling and
@@ -68,7 +69,7 @@ def pr_detail(repo, number, host=None):
     """A PR's head, review decision, checks and conversation. A token that can't read checks
     in some repo still gets the rest; a PR it can't read at all gives {} (and is still watched
     by its search result)."""
-    fields = "headRefOid,reviewDecision,comments,reviews,isDraft"
+    fields = "headRefOid,reviewDecision,comments,reviews,isDraft,commits"
     try:
         return gh(["pr", "view", str(number), "-R", repo, "--json", fields + ",statusCheckRollup"], host)
     except RuntimeError:
@@ -81,7 +82,23 @@ def pr_detail(repo, number, host=None):
 
 
 def others(items, login):
-    return sum(1 for x in items or [] if (x.get("author") or {}).get("login") not in (login, None))
+    """Comments or reviews by people other than Dan (and not bots)."""
+    return sum(1 for x in items or [] if (x.get("author") or {}).get("login") not in (login, None)
+               and not (x.get("author") or {}).get("login", "").endswith("[bot]"))
+
+
+def pushed_by_others(d, login):
+    """Commits on a PR whose authors don't include Dan. Agents commit as Dan, so their pushes don't count."""
+    return sum(1 for c in d.get("commits") or []
+               if login not in [a.get("login") for a in c.get("authors") or []])
+
+
+def issue_talk(repo, number, login):
+    try:
+        d = gh(["issue", "view", str(number), "-R", repo, "--json", "comments"])
+    except RuntimeError:
+        return None
+    return others(d.get("comments"), login)
 
 
 def gerrit(query):
@@ -89,7 +106,7 @@ def gerrit(query):
     isn't set up on this VM or can't be reached: None."""
     try:
         r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", GERRIT, "gerrit", "query",
-                            "--format=JSON", "--current-patch-set", "--all-approvals", query],
+                            "--format=JSON", "--current-patch-set", "--all-approvals", "--comments", query],
                            capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -106,11 +123,23 @@ def gerrit(query):
     return out
 
 
-def votes(change):
+def who(account):
+    account = account or {}
+    return account.get("username") or account.get("email") or account.get("name")
+
+
+def votes(change, skip=None):
     ps = change.get("currentPatchSet") or {}
-    return sorted(f"{a.get('type')}{'+' if int(a.get('value', 0)) > 0 else ''}{a.get('value')} by "
-                  f"{(a.get('by') or {}).get('username') or (a.get('by') or {}).get('email')}"
-                  for a in ps.get("approvals") or [])
+    return sorted(f"{a.get('type')}{'+' if int(a.get('value', 0)) > 0 else ''}{a.get('value')} by {who(a.get('by'))}"
+                  for a in ps.get("approvals") or [] if skip is None or who(a.get("by")) != skip)
+
+
+def gerrit_others(change):
+    """For Dan's own change: (patch sets uploaded by someone else, comments by someone else)."""
+    owner = who(change.get("owner"))
+    ps = change.get("currentPatchSet") or {}
+    theirs_ps = ps.get("revision") if who(ps.get("uploader")) not in (owner, None) else ""
+    return theirs_ps, sum(1 for m in change.get("comments") or [] if who(m.get("reviewer")) != owner)
 
 
 def ago(ts):
@@ -118,8 +147,10 @@ def ago(ts):
     return datetime.datetime.now(datetime.timezone.utc) - t
 
 
-def snapshot(login, terms):
-    """Everything worth watching right now: {key: {line fields, sig fields}}."""
+def snapshot(login, terms, prev=None):
+    """Everything worth watching right now: {key: {line fields, sig fields}}. prev, the last
+    snapshot, saves re-reading conversations that haven't changed."""
+    prev = prev or {}
     snap = {}
     pool = concurrent.futures.ThreadPoolExecutor(8)
     details = {}
@@ -170,7 +201,7 @@ def snapshot(login, terms):
         repo = pr["repository"]["nameWithOwner"]
         d = detail(repo, pr["number"])
         add(f"mine {pr['url']}", "your PR", repo, pr["number"], pr["title"], pr["url"],
-            {"head": d.get("headRefOid") or pr["updatedAt"], "decision": d.get("reviewDecision") or "",
+            {"pushed": pushed_by_others(d, login), "decision": d.get("reviewDecision") or "",
              "ci": checks(d["statusCheckRollup"]) if "statusCheckRollup" in d else "unknown",
              "talk": others(d.get("comments"), login) + others(d.get("reviews"), login), "draft": d.get("isDraft")})
 
@@ -179,8 +210,18 @@ def snapshot(login, terms):
             repo = it["repository"]["nameWithOwner"]
             if (it.get("author") or {}).get("login") == login:
                 continue  # Dan's own: covered above (PRs) or he knows (issues)
-            add(f"inv {it['url']}", "involves you", repo, it["number"], it["title"], it["url"],
-                {"updated": it["updatedAt"]})
+            key = f"inv {it['url']}"
+            old = (prev.get(key) or {}).get("sig", {})
+            if old.get("seen") == it["updatedAt"] and "talk" in old:
+                talk = old["talk"]  # nothing happened since the last read
+            elif kind == "prs":
+                d = pr_detail(repo, it["number"])
+                talk = others(d.get("comments"), login) + others(d.get("reviews"), login) if d else None
+            else:
+                talk = issue_talk(repo, it["number"], login)
+            # Only what others say counts; Dan's own approvals and comments don't.
+            add(key, "involves you", repo, it["number"], it["title"], it["url"],
+                {"talk": talk, "seen": it["updatedAt"]} if talk is not None else {"updated": it["updatedAt"]})
 
     for term, pr in topical:
         key = f"topic {pr['url']}"
@@ -210,9 +251,9 @@ def snapshot(login, terms):
 
     mine_g, review_g = gerrit("owner:self status:open"), gerrit("reviewer:self -owner:self status:open")
     for c in mine_g or []:
+        theirs_ps, talk = gerrit_others(c)
         add(f"gerrit {c['url']}", "your Gerrit change", "gerrit", c["number"], c.get("subject", ""), c["url"],
-            {"head": (c.get("currentPatchSet") or {}).get("revision"), "votes": votes(c),
-             "updated": str(c.get("lastUpdated"))})
+            {"theirs_ps": theirs_ps, "others_votes": votes(c, skip=who(c.get("owner"))), "talk": talk})
     for c in review_g or []:
         add(f"gerrit-review {c['url']}", "Gerrit review", "gerrit", c["number"], c.get("subject", ""), c["url"],
             {"head": (c.get("currentPatchSet") or {}).get("revision")})
@@ -226,7 +267,7 @@ def snapshot(login, terms):
     for pr in fork:
         url = f"https://github.com/{FORK}/pull/{pr['number']}"  # links for Dan are github.com links
         add(f"fork {url}", "private fork", FORK, pr["number"], pr["title"], url,
-            {"head": pr["headRefOid"], "ci": checks(pr.get("statusCheckRollup"))})
+            {"ci": checks(pr.get("statusCheckRollup"))})
     pool.shutdown()
     # The kinds whose sources answered this poll, even with nothing in them, so an empty kind still
     # counts as watched and its first item is news.
@@ -250,6 +291,8 @@ def news(old, new, seeded):
         if was is None:
             if key.split(" ", 1)[0] not in seeded:
                 continue  # a kind of news this state file has never recorded: take it in quietly
+            if key.startswith(("fork ", "gerrit ")):
+                continue  # agents open these as Dan
             why.append("new")
         else:
             if s.get("head") and s.get("head") != w.get("head"):
@@ -258,8 +301,16 @@ def news(old, new, seeded):
                 why.append(s["decision"].lower().replace("_", " "))
             if s.get("ci") != w.get("ci") and s.get("ci") in ("failing", "green"):
                 why.append(f"CI {s['ci']}")
-            if (s.get("talk") or 0) > (w.get("talk") or 0):
-                why.append(f"{s['talk'] - (w.get('talk') or 0)} new comment(s) or review(s)")
+            # A signature field the old state didn't have is a new baseline, not news (an upgrade).
+            if "talk" in w and (s.get("talk") or 0) > (w.get("talk") or 0):
+                why.append(f"{s['talk'] - (w.get('talk') or 0)} new comment(s) or review(s) from others")
+            if "pushed" in w and (s.get("pushed") or 0) > (w.get("pushed") or 0):
+                why.append("new commits from someone else")
+            if s.get("theirs_ps") and "theirs_ps" in w and s["theirs_ps"] != w.get("theirs_ps"):
+                why.append("new patch set from someone else")
+            # New votes from others; votes cleared by Dan's own new patch set aren't news.
+            if "others_votes" in w and set(s.get("others_votes") or []) - set(w.get("others_votes") or []):
+                why.append("votes: " + ", ".join(s["others_votes"]))
             if s.get("updated") and s.get("updated") != w.get("updated"):
                 why.append("new activity")
             if s.get("votes") is not None and s.get("votes") != w.get("votes"):
@@ -307,7 +358,7 @@ def main():
         if os.path.exists(a.terms):
             terms = [t.strip() for t in open(a.terms) if t.strip() and not t.startswith("#")]
         try:
-            snap, queried = snapshot(login, terms)
+            snap, queried = snapshot(login, terms, state)
         except Exception as e:  # a GitHub hiccup: try again next round
             print(f"pr-watch: {e}", file=sys.stderr)
             if a.once:

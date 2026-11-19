@@ -119,8 +119,9 @@ example `redis`, `ociregistry`, `rules_img`), and update it as threads come
 and go.
 
 When it wakes you:
-1. Skip anything that changes nothing for Dan: a bot comment, or CI still
-   running.
+1. Skip anything that changes nothing for Dan: a bot comment, CI still
+   running, or something Dan or you did (his approval or vote, your push).
+   If nothing is left, restart `pr-watch` and say nothing at all.
 2. Review what's left in the background. A PR's first review is codex
    (read-only) and an `adversary` for correctness, each given the diff; Dan's
    own PRs also get an `adversary` for simplicity. A re-review after new
