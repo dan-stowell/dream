@@ -168,7 +168,7 @@ cmd_setup() {
   # EXIT, not RETURN: bash runs RETURN traps when a sourced file finishes too.
   trap "rm -rf '$tmp'" EXIT
   (umask 077 && ctl_curl "$ctl/agent/bundle" | tar -xzm -C "$tmp")
-  # config sets name, kind (classic, dispatcher, hunter or repo), repo,
+  # config sets name, kind (classic, dispatcher, hunter, explore or repo), repo,
   # hunt_target, hunt_priorities, hunt_ticket, git_name, git_email,
   # shelley_model and claude_email; secrets sets gh_token and bb_api_key
   # (both empty for a repo VM).
@@ -274,12 +274,29 @@ TOML
   rm -f ~/.claude/CLAUDE.md
   tee ~/.claude/CLAUDE.md >~/.config/shelley/AGENTS.md <<<"$guidance"
 
-  rm -f ~/.config/vm/dispatcher.md ~/.config/vm/hunter.md
+  rm -f ~/.config/vm/dispatcher.md ~/.config/vm/hunter.md ~/.config/vm/explore.md
   local f
   if [ "$kind" = repo ]; then
     # A research VM: no helper personas, no coordinator role, no Shelley hook.
     for f in "$tmp"/vm-agents/*.md; do rm -f ~/.claude/agents/"${f##*/}"; done
     rm -f ~/.config/vm/coordinator.md ~/.config/vm/coordinator-shelley.md ~/.config/shelley/hooks/system-prompt
+  elif [ "$kind" = explore ]; then
+    # Open-ended exploration with Dan: helpers on hand (an adversary for
+    # pushback when he asks), but no coordinator role and no PR pipeline.
+    cp "$tmp"/vm-agents/*.md ~/.claude/agents/
+    rm -f ~/.config/vm/coordinator.md ~/.config/vm/coordinator-shelley.md
+    sed "s|VMNAME|$name|g" "$tmp/vm-explore.md" >~/.config/vm/explore.md
+    mkdir -p ~/explore
+    cat >~/.config/shelley/hooks/system-prompt <<'EOF'
+#!/bin/sh
+prompt=$(cat)
+printf '%s' "$prompt"
+case $prompt in
+  *"You are a subagent of Shelley"*) ;;
+  *) printf '\n\n'; cat ~/.config/vm/explore.md ;;
+esac
+EOF
+    chmod +x ~/.config/shelley/hooks/system-prompt
   else
     # The main claude coordinates the subagents; a dispatcher is also Dan's
     # home base, and a hunter runs a bug hunt.
@@ -397,6 +414,11 @@ cmd_start() {
       hunter)
         cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md; echo; cat ~/.config/vm/hunter.md)"'
         [ -n "$prompt" ] || prompt='Start the hunt in your notes: read the ticket first if there is one, then begin the first round.'
+        ;;
+      explore)
+        cmd+=' --append-system-prompt "$(cat ~/.config/vm/explore.md)"'
+        # Its pages, at https://NAME.exe.xyz:8000/, private to the VM's users.
+        tmux has-session -t pages 2>/dev/null || tmux new-session -d -s pages -c "$HOME" 'python3 -m http.server 8000 -d ~/explore'
         ;;
       repo) ;;
       *) cmd+=' --append-system-prompt "$(cat ~/.config/vm/coordinator.md)"' ;;
@@ -517,7 +539,8 @@ cmd_backup() {
   done < <(
     # threads.md, watch-terms and notes are a dispatcher's memory; they go with the
     # transcripts, and so does side-llm's log of other models' answers.
-    for p in .claude/projects .claude/history.jsonl .codex/sessions threads.md watch-terms notes side-llm; do
+    # An explorer's pages and notes live in explore.
+    for p in .claude/projects .claude/history.jsonl .codex/sessions threads.md watch-terms notes side-llm explore; do
       [ ! -e "$p" ] || find "$p" -type f "${newer[@]}" -printf '%s %p\0'
     done
     for p in "${files[@]}"; do printf '%s %s\0' "$(stat -c %s "$p")" "$p"; done

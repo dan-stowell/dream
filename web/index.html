@@ -111,6 +111,7 @@ pre.log {
       <label><input type="radio" name="kind" value="classic" checked><span>Classic<small>A coordinator claude for one thread of work on the buildbuddy repos.</small></span></label>
       <label><input type="radio" name="kind" value="dispatcher"><span>Dispatcher<small>Your home base: tracks your priorities and threads in ~/threads.md, suggests focus, reviews PRs every 2h.</small></span></label>
       <label><input type="radio" name="kind" value="hunter"><span>Hunter<small>A bug hunt in rounds: discover, verify on RBE, record in one private ticket.</small></span></label>
+      <label><input type="radio" name="kind" value="explore"><span>Explore<small>Open-ended exploration of the buildbuddy code with you: visualizations and notes served from the VM, pushback when you ask, no PRs.</small></span></label>
       <label><input type="radio" name="kind" value="repo"><span>Repo<small>Research on one repo through the exe.dev GitHub integration, with runs of its overnight.sh.</small></span></label>
     </div>
     <div id="new-spec"></div>
@@ -155,7 +156,7 @@ function readSpec(box, kind) {
 }
 function kindPicker(name, m) {
   const k = m?.kind || "classic";
-  return `<div class="row">${["classic", "dispatcher", "hunter", "repo"].map(x =>
+  return `<div class="row">${["classic", "dispatcher", "hunter", "explore", "repo"].map(x =>
     `<label style="display:flex; gap:4px; align-items:center"><input type="radio" name="k-${esc(name)}-${m ? "m" : "a"}" value="${x}" ${x === k ? "checked" : ""} style="width:auto; margin:0">${x}</label>`).join("")}</div>
     ${specFields(m || {})}`;
 }

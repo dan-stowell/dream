@@ -75,7 +75,7 @@ const (
 // The files vm-child setup needs, besides the generated config and secrets.
 var bundleFiles = []string{
 	"vm-CLAUDE.md", "vm-CLAUDE-buildbuddy.md", "vm-CLAUDE-github.md", "vm-coordinator.md",
-	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-hunter.md", "vm-pr-watch", "vm-gerrit-push", "vm-side-llm", "vm-reviewers.md", "vm-watch-paths", "vm-agents/*.md",
+	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-hunter.md", "vm-explore.md", "vm-pr-watch", "vm-gerrit-push", "vm-side-llm", "vm-reviewers.md", "vm-watch-paths", "vm-agents/*.md",
 }
 
 var (
@@ -87,6 +87,8 @@ var (
 //   - classic: a coordinator claude on the buildbuddy repos
 //   - dispatcher: Dan's home base (vm-dispatcher.md)
 //   - hunter: a bug hunt (vm-hunter.md) with a target, priorities and a ticket
+//   - explore: open-ended exploration of the buildbuddy code with Dan
+//     (vm-explore.md): pages and notes, no PR pipeline
 //   - repo: research on one OWNER/REPO through the exe.dev GitHub integration,
 //     with none of the buildbuddy setup, and runs of the repo's overnight.sh
 type kindSpec struct {
@@ -103,7 +105,7 @@ func (k *kindSpec) check() error {
 	switch k.Kind {
 	case "", "classic":
 		k.Kind = "classic"
-	case "dispatcher":
+	case "dispatcher", "explore":
 	case "hunter":
 		if k.Target == "" {
 			return errors.New("a hunter needs a target")
@@ -131,7 +133,7 @@ func (k kindSpec) apply(m *managed) {
 // managed is a VM this app made or adopted. Only these get jobs, secrets and
 // backups.
 type managed struct {
-	Kind       string    `json:"kind"`           // classic, dispatcher, hunter or repo
+	Kind       string    `json:"kind"`           // classic, dispatcher, hunter, explore or repo
 	Repo       string    `json:"repo,omitempty"` // a repo VM's OWNER/REPO
 	Hunt       *hunt     `json:"hunt,omitempty"` // a hunter's brief
 	Created    time.Time `json:"created"`
@@ -954,6 +956,7 @@ var backupPaths = []struct{ from, to string }{
 	{"watch-terms", "watch-terms"},
 	{"notes/", "notes/"},
 	{"side-llm/", "side-llm/"},
+	{"explore/", "explore/"},
 }
 
 func backupPath(name string) (string, bool) {
