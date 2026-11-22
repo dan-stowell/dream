@@ -189,8 +189,12 @@ cmd_setup() {
     # No token: git and gh reach the repo through the exe.dev GitHub integration.
     echo 'export GH_HOST=github.int.exe.xyz' >~/.config/vm/env
   else
-    gh auth login --hostname github.com --git-protocol https --with-token <<<"$gh_token"
-    gh auth setup-git --hostname github.com
+    # A rejected token (say, expired) costs gh and the private clones, not the VM.
+    if gh auth login --hostname github.com --git-protocol https --with-token <<<"$gh_token"; then
+      gh auth setup-git --hostname github.com
+    else
+      echo "warning: GitHub rejected the token; gh and private repos won't work until it's replaced" >&2
+    fi
     (umask 077 && printf 'export BUILDBUDDY_API_KEY=%q\n' "$bb_api_key" >~/.config/vm/env)
   fi
   grep -q 'config/vm/env' ~/.profile || echo '[ -f ~/.config/vm/env ] && . ~/.config/vm/env' >>~/.profile
@@ -244,7 +248,8 @@ TOML
     for r in buildbuddy buildbuddy-internal buildbuddy-helm buildbuddy-toolchain podman-static; do
       if [ ! -d ~/"$r"/.git ]; then
         echo "Cloning $r..."
-        git clone --quiet --depth 1 "https://github.com/buildbuddy-io/$r.git" ~/"$r"
+        GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 "https://github.com/buildbuddy-io/$r.git" ~/"$r" ||
+          { echo "warning: couldn't clone $r" >&2; continue; }
         if git -C ~/"$r" ls-remote --exit-code --heads origin "$name" >/dev/null; then
           git -C ~/"$r" remote set-branches --add origin "$name"
           git -C ~/"$r" fetch --quiet --depth 1 origin "$name"
