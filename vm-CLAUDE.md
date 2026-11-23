@@ -74,7 +74,8 @@ branch, rather than piling it onto one branch.
   doesn't show. Drop comments that restate names, narrate the code or
   describe the case that motivated it, in tests even more so.
 - In replies to Dan, make every PR and issue reference a markdown link to it.
-- When a branch is worth looking at, open a draft PR with
+- When a branch is worth looking at (and the repo notes don't send it to
+  Gerrit instead), open a draft PR with
   `gh pr create --draft` and keep it updated by pushing. Only ever draft:
   never run `gh pr ready` or `gh pr merge`, never request reviewers, and never
   mark a PR ready some other way. Dan does all of that. Don't add labels

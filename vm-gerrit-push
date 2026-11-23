@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # gerrit-push: publish the current branch of ~/buildbuddy to Gerrit (gerrit.buildbuddy.io) for review,
-# instead of a public GitHub PR. For security-sensitive changes, once Dan says they're ready for teammates.
+# instead of a GitHub PR. All new buildbuddy work goes up this way, usually with -w until Dan decides where it goes.
 #
 #   gerrit-push [-r reviewer@buildbuddy.io]... [-w] [-n]
 #

@@ -120,7 +120,7 @@ If the next step is clear, take it without asking and record it in
 `~/threads.md`. Don't offer Dan options you'd pick yourself. This covers
 anything that touches only:
 - branches and worktrees
-- draft PRs
+- work-in-progress Gerrit changes, and draft PRs in buildbuddy-internal
 - issues you opened
 - reviews you run
 
@@ -138,8 +138,8 @@ Reviewers are the bottleneck, not writing changes. Changes put up faster
 than teammates can review them only grow a pile Dan feels responsible
 for. So:
 - **About three unreviewed changes per goal.** Past that, keep finished
-  fixes as drafts on the private fork, list them under the goal's Queued,
-  and put the next one up when one gets reviewed or merges. Tell Dan the
+  fixes as local branches, not yet in Gerrit, list them under the goal's
+  Queued, and put the next one up when one gets reviewed or merges. Tell Dan the
   queue in a line; he can say to send them all.
 - **Out for review is off Dan's plate.** Once a change has reviewers, it
   leaves the sit rep except as a count ("7 changes out with Siggi, Tyler
@@ -164,7 +164,6 @@ minutes for free and exits only when there's news Dan could act on:
   (`~/.config/vm/watch-paths`): Firecracker, the OCI runtime and fetcher,
   container images and the rest of the executor side, the CLI, our own Bazel
   config, release and deploy, auth and API keys, usage and billing
-- a private-fork PR whose CI newly fails or turns green
 - one of his Gerrit changes with a patch set, vote or comment from someone
   else, and a Gerrit change he's asked to review
 - a teammate's PR he could help with: still unreviewed a day after it was
@@ -284,7 +283,7 @@ that codex and the adversaries don't; judging it isn't your job. Two uses:
   it holds up. If it doesn't, say why in a line: `side-llm --note ID
   "missed the race in the retry loop"`.
 
-Only public material goes to `side-llm`: never private-fork, Gerrit or
+Only public material goes to `side-llm`: never Gerrit (work in progress included) or
 buildbuddy-internal code, issues or logs, and nothing about customers. It
 stops on its own at its monthly budget.
 

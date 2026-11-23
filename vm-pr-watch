@@ -17,7 +17,6 @@ What counts as news (compared with the state file, so nothing is reported twice)
     (topics from ~/threads.md), when it's new or has new commits
   - a teammate's PR opened in the last few days that changes files under Dan's areas (the paths
     file: `repo:prefix` lines, grouped under `# Area` comments), reported once
-  - a private-fork PR whose CI newly fails or turns green (only agents open and push those)
   - a Gerrit change of Dan's (gerrit.buildbuddy.io) with a patch set, vote or comment from someone
     else, and a change where Dan is a reviewer that's new or has a new patch set
   - an open PR in the watched repos, not Dan's, that you could help with: no review yet a day after
@@ -34,7 +33,6 @@ Exit status: 0 with news on stdout (or after --once); 1 when --once can't reach 
 import argparse, concurrent.futures, datetime, json, os, subprocess, sys, time
 from zoneinfo import ZoneInfo
 
-FORK = "dan-stowell/buildbuddy-private-fork"
 OWNER = "buildbuddy-io"
 REPOS = [f"{OWNER}/buildbuddy", f"{OWNER}/buildbuddy-internal"]
 FIELDS = "number,title,url,repository,author,updatedAt"
@@ -303,20 +301,10 @@ def snapshot(login, terms, prev=None, paths=()):
         add(f"gerrit-review {c['url']}", "Gerrit review", "gerrit", c["number"], c.get("subject", ""), c["url"],
             {"head": (c.get("currentPatchSet") or {}).get("revision")})
 
-    try:
-        fork = gh(["pr", "list", "-R", FORK, "--state", "open", "--json", "number,title,url,headRefOid,statusCheckRollup"],
-                  "github.int.exe.xyz")
-        fork_ok = True
-    except RuntimeError:
-        fork, fork_ok = [], False
-    for pr in fork:
-        url = f"https://github.com/{FORK}/pull/{pr['number']}"  # links for Dan are github.com links
-        add(f"fork {url}", "private fork", FORK, pr["number"], pr["title"], url,
-            {"ci": checks(pr.get("statusCheckRollup"))})
     pool.shutdown()
     # The kinds whose sources answered this poll, even with nothing in them, so an empty kind still
     # counts as watched and its first item is news.
-    queried = {"rr", "mine", "inv", "topic", "help"} | ({"area"} if paths else set()) | ({"fork"} if fork_ok else set()) | \
+    queried = {"rr", "mine", "inv", "topic", "help"} | ({"area"} if paths else set()) | \
         ({"gerrit"} if mine_g is not None else set()) | ({"gerrit-review"} if review_g is not None else set())
     return snap, queried
 
@@ -336,7 +324,7 @@ def news(old, new, seeded):
         if was is None:
             if key.split(" ", 1)[0] not in seeded:
                 continue  # a kind of news this state file has never recorded: take it in quietly
-            if key.startswith(("fork ", "gerrit ")):
+            if key.startswith("gerrit "):
                 continue  # agents open these as Dan
             if key.startswith("area ") and not it["sig"].get("areas"):
                 continue  # read, but outside Dan's areas
