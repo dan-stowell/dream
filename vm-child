@@ -35,7 +35,7 @@ mkdir -p "$state" ~/.config/vm
 ctl=$(cat ~/.config/vm/ctl 2>/dev/null || true)
 
 # Matches the sign-in URL in claude auth login's output.
-login_url_re='(https://claude\.com/cai/oauth/authorize[^[:space:][:cntrl:]]+)'
+login_url_re='(https://claude\.(com/cai|ai)/oauth/authorize[^[:space:][:cntrl:]]+)'
 
 ctl_curl() {
   curl -fsS --retry 3 --retry-all-errors --retry-delay 2 "$@"
@@ -364,15 +364,18 @@ ensure_login() {
   tmux kill-session -t vm-login 2>/dev/null || true
   tmux new-session -d -s vm-login -x 2000 -y 50 claude auth login --claudeai --email "$email"
   url=
-  for _ in $(seq 30); do
-    if [[ $(tmux capture-pane -p -J -t vm-login) =~ $login_url_re ]]; then
+  local pane=
+  for _ in $(seq 90); do
+    pane=$(tmux capture-pane -p -J -t vm-login 2>/dev/null) || pane="(the login session has exited)"
+    if [[ $pane =~ $login_url_re ]]; then
       url=${BASH_REMATCH[1]}
       break
     fi
     sleep 1
   done
   if [ -z "$url" ]; then
-    echo "vm: claude auth login never showed a sign-in URL" >&2
+    echo "vm: claude auth login never showed a sign-in URL; it showed:" >&2
+    grep -v '^[[:space:]]*$' <<<"$pane" | tail -15 >&2
     exit 1
   fi
   echo "vm: claude needs a one-time login."
