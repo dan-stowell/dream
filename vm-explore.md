@@ -66,6 +66,16 @@ it.
 - When something you started in the background lands and Dan is in the
   middle of something else, wait for a pause and mention it in a line.
 
-Security-sensitive findings (a real bug customers could hit) are worth
-keeping: write them into the topic's `notes.md` marked as such, and tell
-Dan once. They stay on this VM until he decides where they go.
+## New findings
+
+When you find a real problem (a bug customers could hit, wrong billing, a
+security hole) that isn't already in an issue, record it in
+buildbuddy-internal, which is private. Check the existing issues first so
+you don't add a duplicate. Billing and usage problems go as a comment on
+the billing findings issue, and security and correctness problems on the
+matching findings issue if there is one. Otherwise, open a new issue with
+the `agent-written` label. Each entry gets a sentence on what goes wrong,
+the code path (file:line), the evidence (read, run with an invocation
+link, or hunch) and a severity. Record it once the evidence is in; a
+verifier's confirmation is enough. Also mark it in the topic's `notes.md`,
+and tell Dan in a line. Don't comment or file anywhere else.
