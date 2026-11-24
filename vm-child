@@ -121,7 +121,8 @@ run_job() {
   n=$(jq length <<<"$steps")
   for ((i = 0; i < n; i++)); do
     local -a step
-    mapfile -t step < <(jq -r ".[$i][]" <<<"$steps")
+    # NUL-separated, so an argument with newlines in it (a prompt) stays whole.
+    mapfile -d '' -t step < <(jq -j ".[$i][] | ., \"\\u0000\"" <<<"$steps")
     # Only the command is shown: a login step's argument is a code.
     echo "\$ vm-child ${step[0]}" >>"$log"
     "$self" "${step[@]}" >>"$log" 2>&1 </dev/null &
@@ -435,17 +436,9 @@ cmd_start() {
     tmux send-keys -t claude "$cmd" Enter
     echo "Started claude (Remote Control: $name)."
   elif [ -n "$prompt" ]; then
-    # A running claude keeps only the first line of a multi-line paste, so a
-    # prompt with more than one line goes in a file, and claude gets one line
-    # pointing to it.
-    if [[ $prompt == *$'\n'* ]]; then
-      local f
-      f=~/.config/vm/messages/$(date -u +%Y%m%dT%H%M%SZ).md
-      mkdir -p "${f%/*}"
-      printf '%s\n' "$prompt" >"$f"
-      prompt="A message from Dan, sent through vm-web, is in $f. Read all of it now and act on it as if he had typed it here."
-    fi
-    tmux send-keys -t claude -l "$prompt"
+    # Bracketed paste, so a multi-line prompt isn't submitted at its first newline.
+    printf '%s' "$prompt" | tmux load-buffer -b vm-prompt -
+    tmux paste-buffer -p -d -b vm-prompt -t claude
     sleep 0.5
     tmux send-keys -t claude Enter
     echo "Sent the prompt to claude."
