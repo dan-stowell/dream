@@ -183,6 +183,8 @@ async function api(method, path, body) {
 
 async function loadVMs() {
   const el = $("#vms");
+  // Rebuilding the rows would replace a login field mid-paste.
+  if (document.activeElement?.matches?.(".login input")) return;
   try {
     const {vms, self, ctl_url: ctl, tag} = await api("GET", "/api/vms");
     const drafts = {}, boxes = {};  // keep half-written prompts and open boxes across refreshes
@@ -324,8 +326,9 @@ function fillLogins() {
         <a href="${esc(j.login_url)}" target="_blank" rel="noopener">Sign in</a>
         <button data-copy="${esc(j.login_url)}" style="padding:1px 8px; font-size:12px">copy link</button>,
         then paste the code it shows.</div>
-      <div class="row"><input type="password" autocomplete="off" spellcheck="false" data-job="${j.id}" placeholder="code"
-          value="${esc(loginCodes[j.id] || "")}" style="flex:1; min-width:200px">
+      <div class="row"><input type="text" autocomplete="one-time-code" autocapitalize="off" autocorrect="off" spellcheck="false"
+          data-job="${j.id}" placeholder="code" value="${esc(loginCodes[j.id] || "")}" style="flex:1; min-width:200px">
+        <button data-paste="${j.id}">Paste</button>
         <button class="primary" data-login="${j.id}">Continue</button></div>
       <div class="err"></div>
     </div>`;
@@ -333,6 +336,19 @@ function fillLogins() {
   if (focused) document.querySelector(`.login input[data-job="${focused}"]`)?.focus();
 }
 document.addEventListener("input", e => { if (e.target.matches(".login input")) loginCodes[e.target.dataset.job] = e.target.value; });
+// A plain text field and a Paste button, because iPhone Safari won't offer
+// to paste into a password field.
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-paste]");
+  if (!b) return;
+  const box = b.closest(".login"), input = box.querySelector("input");
+  try {
+    input.value = loginCodes[b.dataset.paste] = (await navigator.clipboard.readText()).trim();
+    box.querySelector(".err").textContent = "";
+  } catch (err) {
+    box.querySelector(".err").textContent = "Couldn't read the clipboard; long-press the field and paste instead.";
+  }
+});
 document.addEventListener("keydown", e => {
   if (e.key === "Enter" && e.target.matches(".login input")) e.target.closest(".login").querySelector("[data-login]").click();
 });
