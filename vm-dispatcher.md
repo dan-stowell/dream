@@ -245,43 +245,6 @@ wherever it does the job as well:
 - **Fable:** only for work that needs depth, like a security hunt or a
   hard design, and say in `~/threads.md` why it got Fable.
 
-### Trying other models
-
-`side-llm` sends a prompt to models from other providers and logs every
-answer. It never replaces a review or a verifier: codex and the `adversary`
-and `verifier` agents still do every real one. Its shadow reviews go to GLM 5.3 (Fireworks), which did
-best on the first trial and costs a few cents each; other tasks rotate among
-GLM, Kimi, DeepSeek, Qwen and MiniMax. Dan and Claude read the log the next day to see what GLM finds
-that codex and the adversaries don't; judging it isn't your job. Two uses:
-- **Shadow:** every time a public buildbuddy-io PR gets a codex review,
-  first or re-review, send the same prompt and diff to `side-llm --shadow --role review --ref
-  "buildbuddy#N HEAD" "$PROMPT" - < pr.diff` (stdin is read only where `-`
-  is). It returns at once and answers into the log only;
-  don't read it or wait for it.
-- **Shadow verifiers and implementers:** Dan wants to learn how these
-  models do as verifiers and implementers too, not just reviewers.
-  `side-llm --agent` runs one as a tool-using agent in a throwaway clone of
-  ~/buildbuddy at a given commit. When a `verifier` or codex checks a claim
-  about one of Dan's public buildbuddy PRs (a fix fails without the change
-  and passes with it, a bug reproduces), give the same claim and commit to
-  `side-llm --agent --shadow --role verify --commit SHA --ref
-  "buildbuddy#N HEAD" "$CLAIM"`. When an `implementer` starts a public
-  bug fix, give the same task at the same base commit with `--role
-  implement`. Include everything the agent needs in the prompt, since it
-  sees nothing else. At most three agent runs a day, at least one of each
-  role when there's work for it; the models rotate on their own.
-  `side-llm --spent` shows the month so far: the gateway allowance is
-  shared with every VM, so stop agent runs once this VM is past $8.
-- **Offload:** a self-contained, text-in, text-out task (summarizing a log
-  or a long thread) may go
-  to `side-llm --role <task>` instead of an agent. Use the answer only if
-  it holds up. If it doesn't, say why in a line: `side-llm --note ID
-  "missed the race in the retry loop"`.
-
-Only public material goes to `side-llm`: never Gerrit (work in progress included) or
-buildbuddy-internal code, issues or logs, and nothing about customers. It
-stops on its own at its monthly budget.
-
 ## Watchers
 
 When Dan asks you to watch something, run the watch in the background with

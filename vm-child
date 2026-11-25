@@ -281,6 +281,7 @@ TOML
   tee ~/.claude/CLAUDE.md >~/.config/shelley/AGENTS.md <<<"$guidance"
 
   rm -f ~/.config/vm/dispatcher.md ~/.config/vm/hunter.md ~/.config/vm/explore.md
+  rm -f ~/.local/bin/side-llm  # retired; its old logs stay in ~/side-llm
   local f
   if [ "$kind" = repo ]; then
     # A research VM: no helper personas, no coordinator role, no Shelley hook.
@@ -313,7 +314,6 @@ EOF
       dispatcher)
         sed "s|VMNAME|$name|g" "$tmp/vm-dispatcher.md" >~/.config/vm/dispatcher.md
         mkdir -p ~/.local/bin && install -m 0755 "$tmp/vm-pr-watch" ~/.local/bin/pr-watch
-        install -m 0755 "$tmp/vm-side-llm" ~/.local/bin/side-llm
         cp "$tmp/vm-reviewers.md" ~/.config/vm/reviewers.md
         cp "$tmp/vm-watch-paths" ~/.config/vm/watch-paths
         ;;
@@ -547,7 +547,7 @@ cmd_backup() {
     batch+=("$path") batch_size=$((batch_size + size))
   done < <(
     # threads.md, watch-terms and notes are a dispatcher's memory; they go with the
-    # transcripts, and so does side-llm's log of other models' answers.
+    # transcripts, and so does the log side-llm kept before it was retired.
     # An explorer's pages and notes live in explore.
     for p in .claude/projects .claude/history.jsonl .codex/sessions threads.md watch-terms notes side-llm explore; do
       [ ! -e "$p" ] || find "$p" -type f "${newer[@]}" -printf '%s %p\0'

@@ -75,7 +75,7 @@ const (
 // The files vm-child setup needs, besides the generated config and secrets.
 var bundleFiles = []string{
 	"vm-CLAUDE.md", "vm-CLAUDE-buildbuddy.md", "vm-CLAUDE-github.md", "vm-coordinator.md",
-	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-hunter.md", "vm-explore.md", "vm-pr-watch", "vm-gerrit-push", "vm-side-llm", "vm-reviewers.md", "vm-watch-paths", "vm-agents/*.md",
+	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-hunter.md", "vm-explore.md", "vm-pr-watch", "vm-gerrit-push", "vm-reviewers.md", "vm-watch-paths", "vm-agents/*.md",
 }
 
 var (
