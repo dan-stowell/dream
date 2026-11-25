@@ -572,7 +572,7 @@ cmd_backup() {
 # `git fetch <bundle> 'refs/*:refs/restored/*'` and `git apply <diff>`.
 # Small scratchpad files go along in scratchpads.tgz.
 snapshot_git() {
-  local out=~/.cache/vm-backup/git gitdir repo name wt key
+  local final=~/.cache/vm-backup/git out=~/.cache/vm-backup/git.new gitdir repo name wt key f
   rm -rf "$out"
   mkdir -p "$out"
   for gitdir in ~/*/.git; do
@@ -580,14 +580,14 @@ snapshot_git() {
     repo=${gitdir%/.git} name=$(basename "$repo")
     mkdir -p "$out/$name"
     {
-      echo "Snapshot of $repo at $(date -u +%FT%TZ)"
+      echo "Snapshot of $repo"
       git -C "$repo" worktree list
       echo
       echo "Commits not on any remote:"
       git -C "$repo" log -n 200 --oneline --decorate --branches --not --remotes
       git -C "$repo" stash list
     } >"$out/$name/README" 2>&1
-    git -C "$repo" bundle create "$out/$name/local.bundle" \
+    git -C "$repo" -c pack.threads=1 bundle create "$out/$name/local.bundle" \
       --branches $(git -C "$repo" rev-parse -q --verify refs/stash >/dev/null && echo refs/stash) \
       --not --remotes >/dev/null 2>&1 || rm -f "$out/$name/local.bundle"
     git -C "$repo" worktree list --porcelain | sed -n 's/^worktree //p' | while IFS= read -r wt; do
@@ -600,14 +600,22 @@ snapshot_git() {
           [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -le $((20 << 20)) ] && printf '%s\0' "$f"
         done >"$out/untracked.list"
         [ ! -s "$out/untracked.list" ] ||
-          tar --null -T "$out/untracked.list" -czf "$out/$name/$key.untracked.tgz" 2>/dev/null) || true
+          tar --null -T "$out/untracked.list" --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - 2>/dev/null |
+          gzip -n >"$out/$name/$key.untracked.tgz") || true
       rm -f "$out/untracked.list"
     done
   done
   # Claude's scratchpads hold review outputs and drafts the transcripts point at.
   [ ! -d /tmp/claude-$(id -u) ] ||
     (cd /tmp/claude-$(id -u) && find . -path '*/scratchpad/*' -type f -size -5M -print0 |
-      tar --null -T - -czf "$out/scratchpads.tgz" 2>/dev/null) || true
+      tar --null -T - --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - 2>/dev/null |
+      gzip -n >"$out/scratchpads.tgz") || true
+  # Keep the old copy of anything unchanged, so its mtime doesn't send it again.
+  (cd "$out" && find . -type f -print0) | while IFS= read -r -d '' f; do
+    ! cmp -s "$out/$f" "$final/$f" || mv "$final/$f" "$out/$f"
+  done
+  rm -rf "$final"
+  mv "$out" "$final"
 }
 
 send_batch() {
