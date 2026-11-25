@@ -952,6 +952,7 @@ var backupPaths = []struct{ from, to string }{
 	{".claude/history.jsonl", "claude/history.jsonl"},
 	{".codex/sessions/", "codex/sessions/"},
 	{".cache/vm-backup/shelley.db", "shelley/shelley.db"},
+	{".cache/vm-backup/git/", "git/"},
 	{"threads.md", "threads.md"},
 	{"watch-terms", "watch-terms"},
 	{"notes/", "notes/"},
