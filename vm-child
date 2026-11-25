@@ -584,7 +584,7 @@ snapshot_git() {
       git -C "$repo" worktree list
       echo
       echo "Commits not on any remote:"
-      git -C "$repo" log --oneline --decorate --branches --not --remotes | head -200
+      git -C "$repo" log -n 200 --oneline --decorate --branches --not --remotes
       git -C "$repo" stash list
     } >"$out/$name/README" 2>&1
     git -C "$repo" bundle create "$out/$name/local.bundle" \
@@ -598,8 +598,10 @@ snapshot_git() {
       (cd "$wt" && git ls-files -z --others --exclude-standard |
         while IFS= read -r -d '' f; do
           [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -le $((20 << 20)) ] && printf '%s\0' "$f"
-        done | tar --null -T - -czf "$out/$name/$key.untracked.tgz" 2>/dev/null) || true
-      tar -tzf "$out/$name/$key.untracked.tgz" 2>/dev/null | grep -q . || rm -f "$out/$name/$key.untracked.tgz"
+        done >"$out/untracked.list"
+        [ ! -s "$out/untracked.list" ] ||
+          tar --null -T "$out/untracked.list" -czf "$out/$name/$key.untracked.tgz" 2>/dev/null) || true
+      rm -f "$out/untracked.list"
     done
   done
   # Claude's scratchpads hold review outputs and drafts the transcripts point at.
