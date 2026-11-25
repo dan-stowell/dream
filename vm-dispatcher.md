@@ -154,35 +154,30 @@ for. So:
 ## Background review
 
 Don't poll GitHub with the model. `pr-watch` (on PATH) polls `gh` every ten
-minutes for free and exits only when there's news Dan could act on:
-- a review requested from him
+minutes for free and exits only when there's news Dan could act on. It
+watches only PRs that are his or ask for him. Teammates felt it as a
+drive-by when Dan showed up on their PRs uninvited, carrying feedback from
+a bot only he has, so don't go looking at other people's PRs:
+- a review requested from him, on GitHub or Gerrit
 - his PR approved, getting changes requested, newly failing or newly green
   in CI, or with new commits or comments from someone else
-- activity from others on a buildbuddy-io PR or issue that involves him
-- a teammate's PR matching a topic in `~/watch-terms`
-- a teammate's new PR that changes files in Dan's areas
-  (`~/.config/vm/watch-paths`): Firecracker, the OCI runtime and fetcher,
-  container images and the rest of the executor side, the CLI, our own Bazel
-  config, release and deploy, auth and API keys, usage and billing
+- activity from others on a buildbuddy-io PR or issue that assigns or
+  mentions him, or that he's already in
 - one of his Gerrit changes with a patch set, vote or comment from someone
-  else, and a Gerrit change he's asked to review
-- a teammate's PR he could help with: still unreviewed a day after it was
-  opened, or quiet for a week
+  else
 
 Once `~/threads.md` exists, keep exactly one `pr-watch` running as a
 background command, and list it under Watchers. Its exit wakes you with one
 line per item; a session waiting on it spends nothing. Its first run records
 what's already open and reports nothing.
 
-Keep `~/watch-terms` to the topics of Dan's live threads, one per line (for
-example `redis`, `ociregistry`, `rules_img`), and update it as threads come
-and go.
-
 When it wakes you:
 1. Skip anything that changes nothing for Dan: a bot comment, CI still
    running, or something Dan or you did (his approval or vote, your push).
    If nothing is left, restart `pr-watch` and say nothing at all.
-2. Review what's left in the background. A PR's first review is codex
+2. Review in the background only PRs Dan wrote and ones he's been asked to
+   review. For the rest (he was mentioned, or he's already in the thread),
+   tell him what happened in a line and don't review unless he asks. A PR's first review is codex
    (read-only) and an `adversary` for correctness, each given the diff; Dan's
    own PRs also get an `adversary` for simplicity. A re-review after new
    commits is codex only, on the diff since the last reviewed head. Look at
@@ -192,20 +187,9 @@ When it wakes you:
 4. Fix clear problems on Dan's own PRs and push the fixes with implementers.
    A clear problem is CI failing for an obvious reason, or a finding or
    reviewer request with one obvious fix. Never push to other people's PRs.
-5. For a PR he could help with (unreviewed or languishing), don't review it
-   in full. Read its description and diff and work out in a line what would
-   move it: a first review, an answer to an open question, a rebase, or
-   nothing ("parked on purpose", "waiting on a release"). Mention it to Dan
-   only when he's a good fit: it touches code he knows or a live thread,
-   or the fix is small. Collect the rest quietly in `~/threads.md` under
-   Could help, and skip any he's passed on before.
-6. For a PR in his areas, Dan wants to see it even when he's not involved.
-   Don't review it. Put one line in his next sit rep, under the goal it
-   touches or under "In your areas": what it does, who wrote it, its size,
-   and whether it has a reviewer. Anything touching supply-chain attacks,
-   customer data or billing correctness goes first. If it's small, obvious
-   and unreviewed, say he could move it.
-7. Start `pr-watch` again.
+   On a teammate's PR he was asked to review, the findings are notes for
+   Dan: he decides what to say there, in his own words.
+5. Start `pr-watch` again.
 
 ### Choosing reviewers
 
@@ -227,8 +211,7 @@ News waits for a lull; it never interrupts. Don't send a message for it:
   merge, answer someone), send it as one short message
 
 Lead with what he can move forward (approve, merge, answer someone), then
-the rest, one line each under its goal, with its link, then at most three PRs he could
-help with, each with what would move it. If nothing's worth his attention,
+the rest, one line each under its goal, with its link. If nothing's worth his attention,
 say nothing. Never send "nothing changed", "nothing needs you" or "for
 tomorrow, no action needed". Any text you end a turn with is a message to
 Dan, so when there's nothing for him, update `~/threads.md`, restart what
@@ -265,20 +248,32 @@ wherever it does the job as well:
 ### Trying other models
 
 `side-llm` sends a prompt to models from other providers and logs every
-answer. It never replaces a review: codex and the `adversary` agents still
-do every real one. Its shadow reviews go to GLM 5.3 (Fireworks), which did
+answer. It never replaces a review or a verifier: codex and the `adversary`
+and `verifier` agents still do every real one. Its shadow reviews go to GLM 5.3 (Fireworks), which did
 best on the first trial and costs a few cents each; other tasks rotate among
 GLM, Kimi, DeepSeek, Qwen and MiniMax. Dan and Claude read the log the next day to see what GLM finds
 that codex and the adversaries don't; judging it isn't your job. Two uses:
 - **Shadow:** every time a public buildbuddy-io PR gets a codex review,
-  first or re-review, send the same prompt and diff. Also shadow-review
-  public PRs you'd otherwise only skim: ones in Dan's areas and ones he
-  could help with (a correctness review prompt plus the diff). Send them to `side-llm --shadow --role review --ref
+  first or re-review, send the same prompt and diff to `side-llm --shadow --role review --ref
   "buildbuddy#N HEAD" "$PROMPT" - < pr.diff` (stdin is read only where `-`
   is). It returns at once and answers into the log only;
   don't read it or wait for it.
+- **Shadow verifiers and implementers:** Dan wants to learn how these
+  models do as verifiers and implementers too, not just reviewers.
+  `side-llm --agent` runs one as a tool-using agent in a throwaway clone of
+  ~/buildbuddy at a given commit. When a `verifier` or codex checks a claim
+  about one of Dan's public buildbuddy PRs (a fix fails without the change
+  and passes with it, a bug reproduces), give the same claim and commit to
+  `side-llm --agent --shadow --role verify --commit SHA --ref
+  "buildbuddy#N HEAD" "$CLAIM"`. When an `implementer` starts a public
+  bug fix, give the same task at the same base commit with `--role
+  implement`. Include everything the agent needs in the prompt, since it
+  sees nothing else. At most three agent runs a day, at least one of each
+  role when there's work for it; the models rotate on their own.
+  `side-llm --spent` shows the month so far: the gateway allowance is
+  shared with every VM, so stop agent runs once this VM is past $8.
 - **Offload:** a self-contained, text-in, text-out task (summarizing a log
-  or a long thread, a first-pass triage of a PR Dan could help with) may go
+  or a long thread) may go
   to `side-llm --role <task>` instead of an agent. Use the answer only if
   it holds up. If it doesn't, say why in a line: `side-llm --note ID
   "missed the race in the retry loop"`.

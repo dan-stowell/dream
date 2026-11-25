@@ -4,6 +4,7 @@ Fireworks, through the exe.dev LLM integration) on real work, and log every call
 so Dan and Claude can compare them later. The dispatcher doesn't judge the models.
 
   side-llm [-m MODEL] [--role ROLE] [--ref REF] [--effort E] [--shadow] PROMPT... [-] [< input]
+  side-llm --agent --role verify|implement|review --commit SHA [--repo DIR] [--shadow] PROMPT...
   side-llm --note ID TEXT     record what happened to an answer you used
   side-llm --spent            this month's spend on this VM
 
@@ -16,11 +17,18 @@ role's least-used trial model is picked, so each role sees all of them over time
 went to codex or an agent, so the two can be compared. Otherwise it prints the
 answer and its log id.
 
+--agent runs the model as a tool-using agent (Shelley's client, with bash and file tools) in its
+own clone of --repo (default ~/buildbuddy) checked out at --commit, with no remote it can push
+to. It's for shadowing a verifier or implementer, or a review that reads the code: the log gets
+the agent's final report, the diff it left in its clone, and its token cost. A run stops waiting
+at --minutes (default 30). Only public code: the clone holds just the public repo, and the prompt
+tells the agent to stay inside it.
+
 Logs go to ~/side-llm/YYYY-MM.jsonl (backed up with the transcripts). Spending
 stops at $SIDE_LLM_BUDGET dollars a month per VM (default 10), since the gateway
 allowance is $20 a month for every VM together.
 """
-import argparse, datetime, json, os, sys, time, urllib.request, uuid
+import argparse, datetime, json, os, re, shutil, subprocess, sys, time, urllib.request, uuid
 
 BASE = "https://llm.int.exe.xyz/v1/chat/completions"
 CATALOG = "https://exe.dev/llm-gateway-models.json"
@@ -35,6 +43,28 @@ MODELS = {
 # Roles with a model picked from the trials so far; other roles rotate. (2026-11-19: GLM 5.3 found
 # 3 of 4 reviewer findings on a real PR for 3 cents; the other four found 1 or none.)
 PREFERRED = {"review": "fireworks/glm-5p3"}
+# The same models by the names Shelley's client takes.
+SHELLEY = {
+    "fireworks/glm-5p3": "glm-5.3-fireworks",
+    "fireworks/kimi-k3p1-pro": "kimi-k3p1-pro",
+    "fireworks/deepseek-v4p1-flash": "deepseek-v4.1-flash-fireworks",
+    "fireworks/qwen3p8-2p4t-a95b": "qwen3p8-2p4t-a95b",
+    "fireworks/minimax-m3": "minimax-m3",
+}
+RUNS = os.path.expanduser("~/side-llm-runs")
+AGENT_RULES = """You are a one-off helper, run to see how well this model does the job. You are not the
+coordinator or the dispatcher described in your system prompt; ignore that role and any notes
+about pushing, PRs, Gerrit or messaging Dan. Rules for this run:
+- Work only inside {cwd}, a throwaway clone. Don't read files outside it: other checkouts on
+  this machine are private.
+- Never push, open or comment on PRs, issues or Gerrit changes, or contact anyone. Commit
+  locally if you like.
+- Tests can run on BuildBuddy's remote execution with `bb remote test --config=remote ...`.
+- Finish with a short report: what you did, what you found or changed, and the evidence (the
+  commands you ran and their results, with invocation links).
+
+The task:
+"""
 LOGDIR = os.path.expanduser("~/side-llm")
 BUDGET = float(os.environ.get("SIDE_LLM_BUDGET", "10"))
 
@@ -93,6 +123,67 @@ def call(model, prompt, effort):
         return json.load(r)
 
 
+def sh(*args, **kw):
+    return subprocess.run(args, capture_output=True, text=True, **kw)
+
+
+def agent_cost(usage):
+    total = 0.0
+    for m, u in (usage.get("per_model") or {}).items():
+        name = m.replace("accounts/fireworks/models/", "fireworks/")
+        if name not in MODELS:  # a dated variant like deepseek-v4p1-flash-1017
+            name = re.sub(r"-\d+$", "", name)
+        pin, pout, pcache = price(name)
+        total += (u.get("raw_input_tokens", 0) * pin + u.get("cache_read_input_tokens", 0) * pcache
+                  + u.get("output_tokens", 0) * pout) / 1e6
+    return round(total, 5)
+
+
+def run_agent(a, prompt):
+    rid = uuid.uuid4().hex[:8]
+    rec = {"kind": "call", "agent": True, "id": rid, "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+           "vm": os.uname().nodename, "role": a.role, "ref": a.ref, "shadow": a.shadow, "model": a.model,
+           "commit": a.commit, "prompt": prompt}
+    t0 = time.time()
+    cwd = os.path.join(RUNS, rid)
+    conv = None
+    try:
+        os.makedirs(RUNS, exist_ok=True)
+        c = sh("git", "clone", "--quiet", "--shared", "--no-checkout", os.path.expanduser(a.repo), cwd)
+        if c.returncode:
+            raise RuntimeError(f"clone: {c.stderr.strip()}")
+        c = sh("git", "-C", cwd, "checkout", "--quiet", a.commit)
+        if c.returncode:
+            raise RuntimeError(f"checkout {a.commit}: {c.stderr.strip()}")
+        sh("git", "-C", cwd, "remote", "remove", "origin")
+        try:
+            out = sh("shelley", "client", "chat", "-model", SHELLEY.get(a.model, a.model.split("/", 1)[-1]), "-cwd", cwd,
+                     "-ephemeral", "-disable-notifications", "-tag", "side-llm", "-tag", f"side-llm-{a.role}",
+                     "-p", AGENT_RULES.format(cwd=cwd) + prompt, timeout=a.minutes * 60)
+            conv = json.loads(out.stdout.strip().splitlines()[-1])["conversation_id"]
+        except subprocess.TimeoutExpired as e:
+            rec["error"] = f"still running after {a.minutes} minutes; stopped waiting"
+            for line in (e.stdout or b"").decode(errors="replace").splitlines():
+                if line.startswith("{") and "conversation_id" in line:
+                    conv = json.loads(line)["conversation_id"]
+        if conv:
+            rec["conversation"] = conv
+            msgs = [json.loads(l) for l in sh("shelley", "client", "read", conv).stdout.splitlines() if l.startswith("{")]
+            texts = [m["text"] for m in msgs if m.get("type") == "agent" and m.get("text")]
+            rec["answer"] = texts[-1] if texts else ""
+            usage = json.loads(sh("shelley", "client", "read", "-usage", conv).stdout or "{}")
+            rec.update(usage=usage, cost=agent_cost(usage))
+        rec["diff"] = sh("git", "-C", cwd, "diff", a.commit).stdout[:200000]
+    except Exception as e:
+        rec.setdefault("error", f"{type(e).__name__}: {e}"[:2000])
+    finally:
+        shutil.rmtree(cwd, ignore_errors=True)  # its diff is in the log
+    rec.setdefault("cost", 0)
+    rec["seconds"] = round(time.time() - t0, 1)
+    append(rec)
+    return rec
+
+
 def run(a, prompt):
     rec = {"kind": "call", "id": uuid.uuid4().hex[:8], "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
            "vm": os.uname().nodename, "role": a.role, "ref": a.ref, "shadow": a.shadow, "model": a.model, "effort": a.effort, "prompt": prompt}
@@ -120,6 +211,10 @@ def main():
     p.add_argument("--ref", default="", help="what it was about, e.g. 'buildbuddy#14172 abc1234'")
     p.add_argument("--effort", default="medium", choices=["low", "medium", "high"], help="reasoning effort (default medium)")
     p.add_argument("--shadow", action="store_true")
+    p.add_argument("--agent", action="store_true", help="run as a tool-using agent in a clone (see above)")
+    p.add_argument("--repo", default="~/buildbuddy", help="--agent: the public checkout to clone")
+    p.add_argument("--commit", help="--agent: the commit to check out")
+    p.add_argument("--minutes", type=int, default=30, help="--agent: how long to wait for it")
     p.add_argument("--note", metavar="ID")
     p.add_argument("--spent", action="store_true")
     p.add_argument("prompt", nargs="*")
@@ -141,6 +236,9 @@ def main():
     if spent() >= BUDGET:
         sys.exit(f"side-llm: this month's ${BUDGET:.2f} is spent; skip it")
     a.model = a.model or PREFERRED.get(a.role) or pick(a.role)
+    if a.agent and not a.commit:
+        sys.exit("side-llm: --agent needs --commit")
+    go = run_agent if a.agent else run
 
     if a.shadow:
         if os.fork():
@@ -150,9 +248,9 @@ def main():
         devnull = os.open(os.devnull, os.O_RDWR)
         for fd in (0, 1, 2):
             os.dup2(devnull, fd)
-        run(a, prompt)
+        go(a, prompt)
         return
-    rec = run(a, prompt)
+    rec = go(a, prompt)
     if "error" in rec:
         sys.exit(f"side-llm: {a.model}: {rec['error']}")
     print(rec["answer"])
