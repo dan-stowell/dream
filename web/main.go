@@ -33,6 +33,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path"
 	"path/filepath"
@@ -76,6 +77,7 @@ const (
 var bundleFiles = []string{
 	"vm-CLAUDE.md", "vm-CLAUDE-buildbuddy.md", "vm-CLAUDE-github.md", "vm-coordinator.md",
 	"vm-coordinator-shelley.md", "vm-dispatcher.md", "vm-hunter.md", "vm-explore.md", "vm-pr-watch", "vm-gerrit-push", "vm-reviewers.md", "vm-watch-paths", "vm-agents/*.md",
+	"vm-CLAUDE-local.md",
 }
 
 var (
@@ -90,7 +92,9 @@ var (
 //   - explore: open-ended exploration of the buildbuddy code with Dan
 //     (vm-explore.md): pages and notes, no PR pipeline
 //   - repo: research on one OWNER/REPO through the exe.dev GitHub integration,
-//     with none of the buildbuddy setup, and runs of the repo's overnight.sh
+//     with none of the buildbuddy setup, and runs of the repo's overnight.sh.
+//     For local/NAME the repo lives only on the VM, seeded once from the git
+//     repo at ~/seeds/NAME on this host (backups keep its history).
 type kindSpec struct {
 	Kind       string `json:"kind"`
 	Repo       string `json:"repo"`
@@ -1202,6 +1206,15 @@ func (s *server) agentBundle(w http.ResponseWriter, r *http.Request) {
 				gen["gerrit_key"] = b
 			}
 		}
+	}
+	if name, ok := strings.CutPrefix(m.Repo, "local/"); ok && kind == "repo" {
+		home, _ := os.UserHomeDir()
+		b, err := exec.Command("git", "-C", filepath.Join(home, "seeds", name), "bundle", "create", "-", "--all").Output()
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, "no seed repo at ~/seeds/%s: %v", name, err)
+			return
+		}
+		gen["seed.bundle"] = b
 	}
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)

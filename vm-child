@@ -237,12 +237,22 @@ TOML
   local guidance
   if [ "$kind" = repo ]; then
     local dir=$HOME/${repo#*/}
-    if [ ! -d "$dir/.git" ]; then
-      echo "Cloning $repo..."
-      git clone --quiet "https://github.int.exe.xyz/$repo.git" "$dir"
+    if [[ $repo == local/* ]]; then
+      # A repo that lives only on this VM: seeded once, never pulled again.
+      if [ ! -d "$dir/.git" ]; then
+        echo "Seeding $dir..."
+        git clone --quiet "$tmp/seed.bundle" "$dir"
+        git -C "$dir" remote remove origin
+      fi
+      guidance=$(sed "s|REPODIR|\`$dir\`|" "$tmp/vm-CLAUDE-local.md")
+    else
+      if [ ! -d "$dir/.git" ]; then
+        echo "Cloning $repo..."
+        git clone --quiet "https://github.int.exe.xyz/$repo.git" "$dir"
+      fi
+      guidance=$(sed "s|REPOS|\`$repo\`|" "$tmp/vm-CLAUDE-github.md")
     fi
     echo "$dir" >~/.config/vm/repo-dir
-    guidance=$(sed "s|REPOS|\`$repo\`|" "$tmp/vm-CLAUDE-github.md")
   else
     rm -f ~/.config/vm/repo-dir
     local r
@@ -472,7 +482,9 @@ cmd_run() {
   # Pick up harness changes pushed from elsewhere (LOOP.md, the Stop hook,
   # overnight.sh) before the run starts; a checkout that can't fast-forward
   # is left as it is.
-  if git -C "$dir" pull --ff-only --quiet; then
+  if ! git -C "$dir" rev-parse -q --verify '@{upstream}' >/dev/null; then
+    echo "Local repo: $(git -C "$dir" log --oneline -1)"
+  elif git -C "$dir" pull --ff-only --quiet; then
     echo "Up to date: $(git -C "$dir" log --oneline -1)"
   else
     echo "vm: couldn't fast-forward $dir; running it as it is" >&2
